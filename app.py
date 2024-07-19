@@ -321,11 +321,11 @@ def display_balance_results(results, quarters):
                 else:
                     st.write(f"No data found for {terms[i + 1]}")
 
-    st.subheader("Balance Sheet Data Tables")
-    for term, df in results.items():
-        df = df.reindex(columns=['File'] + valid_quarters)
-        st.write(f"Results for {term}")
-        st.dataframe(df)
+    # st.subheader("Balance Sheet Data Tables")
+    # for term, df in results.items():
+    #     df = df.reindex(columns=['File'] + valid_quarters)
+    #     st.write(f"Results for {term}")
+    #     st.dataframe(df)
 
 def profit_loss_page():
     uploaded_files = st.sidebar.file_uploader("Choose Excel files for BS & PL", type='xlsx', accept_multiple_files=True, key='profit_files')
@@ -444,14 +444,14 @@ def display_profit_results(results, quarters, fy_columns):
                 else:
                     st.write(f"No data found for {terms[i + 1]}")
 
-    st.subheader("Profit & Loss Tables")
-    for term, df in results.items():
-        if term == "Profit for the year":
-            df = df.reindex(columns=['File'] + fy_columns)
-        else:
-            df = df.reindex(columns=['File'] + valid_quarters)
-        st.write(f"Results for {term}")
-        st.dataframe(df)
+    # st.subheader("Profit & Loss Tables")
+    # for term, df in results.items():
+    #     if term == "Profit for the year":
+    #         df = df.reindex(columns=['File'] + fy_columns)
+    #     else:
+    #         df = df.reindex(columns=['File'] + valid_quarters)
+    #     st.write(f"Results for {term}")
+    #     st.dataframe(df)
 
 def kpi_page():
     uploaded_files = st.sidebar.file_uploader("Choose Excel files for KPI", type='xlsx', accept_multiple_files=True, key='kpi_files')
