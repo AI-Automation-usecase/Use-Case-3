@@ -1,12 +1,15 @@
 import streamlit as st
 import pandas as pd
 import requests
-import json
+import os
+import zipfile
+import fitz  # PyMuPDF
 import re
+from datetime import datetime
+import numpy as np
+import json
 import streamlit.components.v1 as components
 from io import BytesIO
-import numpy as np
-from sklearn.linear_model import LinearRegression
 
 
 # Set page configuration
@@ -62,28 +65,34 @@ if 'balance_data_frames' not in st.session_state:
     st.session_state['balance_data_frames'] = []
 if 'balance_results' not in st.session_state:
     st.session_state['balance_results'] = {}
-if 'balance_quarters_range' not in st.session_state:
-    st.session_state['balance_quarters_range'] = None
+if 'balance_fy_range' not in st.session_state:
+    st.session_state['balance_fy_range'] = None
 if 'balance_terms' not in st.session_state:
     st.session_state['balance_terms'] = []
-
-if 'profit_files_processed' not in st.session_state:
-    st.session_state['profit_files_processed'] = False
-if 'profit_data_frames' not in st.session_state:
-    st.session_state['profit_data_frames'] = []
-if 'profit_results' not in st.session_state:
-    st.session_state['profit_results'] = {}
-if 'profit_quarters_range' not in st.session_state:
-    st.session_state['profit_quarters_range'] = None
-if 'profit_terms' not in st.session_state:
-    st.session_state['profit_terms'] = []
 
 if 'include_forecast_bs' not in st.session_state:
     st.session_state['include_forecast_bs'] = False
 if 'include_forecast_pl' not in st.session_state:
     st.session_state['include_forecast_pl'] = False
 
-# Initialize session state variables
+if 'pl_files_processed' not in st.session_state:
+    st.session_state['pl_files_processed'] = False
+if 'pl_data_frames' not in st.session_state:
+    st.session_state['pl_data_frames'] = []
+if 'pl_results_quarters' not in st.session_state:
+    st.session_state['pl_results_quarters'] = {}
+if 'pl_results_fy' not in st.session_state:
+    st.session_state['pl_results_fy'] = {}
+if 'pl_fy_range' not in st.session_state:
+    st.session_state['pl_fy_range'] = None
+if 'sorted_pl_quarters' not in st.session_state:
+    st.session_state['sorted_pl_quarters'] = []
+if 'sorted_pl_fys' not in st.session_state:
+    st.session_state['sorted_pl_fys'] = []
+
+if 'df_combined' not in st.session_state:
+    st.session_state['df_combined'] = {}
+
 if 'kpi_uploaded_files' not in st.session_state:
     st.session_state['kpi_uploaded_files'] = []
 if 'kpi_file_processed' not in st.session_state:
@@ -95,136 +104,602 @@ if 'kpi_results' not in st.session_state:
 if 'kpi_fy_columns' not in st.session_state:
     st.session_state['kpi_fy_columns'] = None
 
+if 'downloaded_files' not in st.session_state:
+    st.session_state['downloaded_files'] = {}
 
+
+
+# Function to download files from the website only once
+def download_files_once(company_symbol):
+    if company_symbol in st.session_state['downloaded_files']:
+        return st.session_state['downloaded_files'][company_symbol]
+    else:
+        company_name, all_files = download_files(company_symbol)
+        st.session_state['downloaded_files'][company_symbol] = (company_name, all_files)
+        return company_name, all_files
+
+
+def extract_data_from_pdf_bs(pdf_file, heading_map, conversion_factor, pdf_filename):
+    doc = fitz.open(stream=pdf_file, filetype="pdf")
+    data = []
+    date_columns = []
+ 
+    total_pages = len(doc)
+   
+    consolidated_bs_pattern = r"Consolidated Balance Sheet.*"
+ 
+    for page_num in range(total_pages):
+        page_text = doc.load_page(page_num).get_text("text")
+        #st.write(f"Debug: Reading page {page_num + 1} of {pdf_filename}")
+        #st.write(f"Debug: Page content in {pdf_filename}: {page_text[:500]}...")  # Output the first 500 characters of the page
+ 
+        # Look for the Consolidated Balance Sheet pattern
+        match = re.search(consolidated_bs_pattern, page_text, re.IGNORECASE)
+        if not match:
+            #st.write(f"Debug: Consolidated Balance Sheet pattern not found on page {page_num + 1} of {pdf_filename}")
+            continue
+ 
+        # Check if this page has the required headings
+        current_page_headings = {key for key, variations in heading_map.items() for heading in variations if re.search(rf"{re.escape(heading)}", page_text, re.IGNORECASE)}
+        if current_page_headings == set(heading_map.keys()):
+            date_columns = extract_date_columns(page_text)
+            data = extract_values(page_text, heading_map, conversion_factor, pdf_filename)
+            return data, date_columns
+ 
+        # If not all headings are found, check the next page
+        if page_num + 1 < total_pages:
+            next_page_text = doc.load_page(page_num + 1).get_text("text")
+            combined_text = page_text + "\n" + next_page_text
+ 
+            current_combined_headings = {key for key, variations in heading_map.items() for heading in variations if re.search(rf"{re.escape(heading)}", combined_text, re.IGNORECASE)}
+            if current_combined_headings == set(heading_map.keys()):
+                date_columns = extract_date_columns(combined_text)
+                data = extract_values(combined_text, heading_map, conversion_factor, pdf_filename)
+                return data, date_columns
+ 
+    st.write(f"Debug: No relevant data found in file: {pdf_filename}")
+    return None, None
+
+
+
+def extract_date_columns(text):
+    page_date_columns = re.findall(r"As at\s+(.*)\s+As at\s+(.*)", text, re.IGNORECASE)
+    if not page_date_columns:
+        page_date_columns = re.findall(r"(\b\w+ \d{1,2}, \d{4}\b)\s+(\b\w+ \d{1,2}, \d{4}\b)", text, re.IGNORECASE)
+    if not page_date_columns:
+        page_date_columns = re.findall(r"(\d{1,2} \b\w+ \d{4}\b)\s+(\d{1,2} \b\w+ \d{4}\b)", text, re.IGNORECASE)
+    if not page_date_columns:
+        page_date_columns = re.findall(r"As at March 31,\s+(\d{4})\s+(\d{4})", text, re.IGNORECASE)
+        if page_date_columns:
+            page_date_columns = [(f"March 31, {date.strip()}" for date in page_date_columns[0])]
+    if not page_date_columns:
+        page_date_columns = re.findall(r"As at March 31,\s+(\d{4})\s+(\d{4})", text, re.IGNORECASE)
+        if page_date_columns:
+            page_date_columns = [(f"March 31, {page_date_columns[0][0]}", f"March 31, {page_date_columns[0][1]}")]
+
+    if not page_date_columns:
+        return []
+
+    date_list = []
+    for date in page_date_columns[0]:
+        for fmt in ("%B %d, %Y", "%d %B %Y"):
+            try:
+                date_obj = datetime.strptime(date.strip(), fmt)
+                date_list.append(date_obj.strftime("%d-%m-%Y"))
+                break
+            except ValueError:
+                continue
+    return date_list
+
+# Function to download files from the website
+def download_files(company_symbol):
+    url = f"https://www.nseindia.com/api/corp-info?symbol={company_symbol}&corpType=annualreport&market=cm"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}",
+        "X-Requested-With": "XMLHttpRequest",
+        "Connection": "keep-alive"
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+
+    init_url = f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}"
+    session.get(init_url)
+
+    response = session.get(url)
+
+    if response.status_code == 200:
+        data = response.json()
+        if data:
+            company_name_key = 'companyName' if 'companyName' in data[0] else 'company_name'
+            company_name = data[0][company_name_key].replace(" ", "_")
+            os.makedirs(company_name, exist_ok=True)
+
+            file_names = [item['fileName'].split("/")[-1] for item in data[:4]]
+            df_files = pd.DataFrame(file_names, columns=['FileName'])
+            df_files['Exists'] = df_files['FileName'].apply(lambda x: os.path.isfile(os.path.join(company_name, x)))
+
+            files_to_download = df_files[df_files['Exists'] == False]['FileName'].tolist()
+
+            with st.spinner("Downloading files..."):
+                for file_name in files_to_download:
+                    file_url = next(item['fileName'] for item in data if item['fileName'].endswith(file_name))
+                    file_extension = file_name.split('.')[-1].lower()
+
+                    if file_extension in ['zip', 'pdf']:
+                        file_response = session.get(file_url)
+
+                        if file_response.status_code == 200:
+                            file_path = os.path.join(company_name, file_name)
+                            with open(file_path, 'wb') as file:
+                                file.write(file_response.content)
+
+            return company_name, df_files['FileName'].tolist()
+
+    return None, []
+# Function to load and process the data from the Excel file
+def load_and_process_data(excel_file_path):
+    excel_data = pd.ExcelFile(excel_file_path)
+    processed_data = {}
+    all_fy_columns = set()
+
+    for sheet_name in excel_data.sheet_names:
+        df = pd.read_excel(excel_file_path, sheet_name=sheet_name)
+        df.set_index('Financial Year', inplace=True)
+
+        # Collect all FY columns dynamically
+        fy_columns = [col for col in df.columns if re.match(r'^FY \d{2}-\d{2}$', col)]
+        all_fy_columns.update(fy_columns)
+        
+        processed_data[sheet_name] = df
+
+    # Sort FY columns in ascending order based on the year part
+    sorted_fy_columns = sorted(all_fy_columns, key=lambda x: int(x.split()[1].split('-')[0]))
+
+    return processed_data, sorted_fy_columns
+
+
+def extract_values(text, heading_map, conversion_factor, pdf_filename):
+    with st.spinner(f"Fetching data from {pdf_filename}..."):
+        lines = text.splitlines()
+        data = []
+        for key, variations in heading_map.items():
+            for heading in variations:
+                pattern = re.compile(rf"{re.escape(heading)}", re.IGNORECASE)
+                for i, line in enumerate(lines):
+                    if pattern.search(line.strip()):
+                        try:
+                            value_lines = lines[i+1:i+4]
+                            numeric_values = []
+
+                            for v in value_lines:
+                                # Replace \xa0 with a regular space and remove commas and spaces
+                                v_clean = v.replace('\xa0', '').replace(',', '').strip()
+
+                                # Check if the value is numeric or has a pattern like '5 (iii)', '8(c)', or similar
+                                if re.match(r'^-?\d+(\.\d+)?(\s*\([ivx]+\))?$', v_clean, re.IGNORECASE) or re.match(r'^\d+(\.\d+)?$', v_clean):
+                                    numeric_values.append(float(re.sub(r'\s*\([ivx]+\)', '', v_clean)))
+
+                            # If we have at least two numeric values, use them
+                            if len(numeric_values) >= 2:
+                                value1 = numeric_values[-2] * conversion_factor
+                                value2 = numeric_values[-1] * conversion_factor
+                            else:
+                                value1, value2 = None, None
+
+                            data.append([key, value1, value2])
+                        except IndexError as e:
+                            data.append([key, None, None])
+                        except TypeError as e:
+                            data.append([key, None, None])
+                        break
+        return data
+
+
+
+def reformat_date_columns(date_columns):
+    reformatted_columns = []
+    for col in date_columns:
+        try:
+            date_obj = datetime.strptime(col, "%d-%m-%Y")
+            reformatted_columns.append(date_obj.strftime("%d-%m-%Y"))
+        except ValueError:
+            reformatted_columns.append(col)
+    return reformatted_columns
+
+def extract_year(column_name):
+    match = re.search(r'\d{4}', column_name)
+    return int(match.group()) if match else 0
+
+def calculate_financial_year(date_str):
+    try:
+        date_obj = datetime.strptime(date_str, "%d-%m-%Y")
+        if date_obj.month > 3:
+            fy_start = date_obj.year
+            fy_end = date_obj.year + 1
+        else:
+            fy_start = date_obj.year - 1
+            fy_end = date_obj.year
+        return f"FY {str(fy_start)[-2:]}-{str(fy_end)[-2:]}"
+    except ValueError:
+        return None
+
+# Function to display data for each heading across all companies based on FY values
+def display_data_for_heading(processed_data, heading, fy_columns):
+    all_data = []
+    columns = ['Company'] + fy_columns
+
+    for company, data in processed_data.items():
+        if heading in data.index:
+            row = [company] + [data.at[heading, fy] if fy in data.columns else None for fy in fy_columns]
+        else:
+            row = [company] + [None] * len(fy_columns)
+        all_data.append(row)
+    
+    result_df = pd.DataFrame(all_data, columns=columns)
+    
+    # Sort the FY columns
+    sorted_columns = ['Company'] + sort_fy_columns(result_df.columns[1:])
+    result_df = result_df[sorted_columns]
+    
+    return result_df
+
+def convert_lakhs_to_crores_value(value):
+    if isinstance(value, (int, float)):
+        return value / 100  # Convert lakhs to crores
+    elif isinstance(value, str):
+        cleaned_value = value.replace(',', '').strip()
+        if cleaned_value.replace('.', '', 1).isdigit():
+            return float(cleaned_value) / 100  # Convert lakhs to crores
+    return value  # If the value is not a number or cannot be converted, return it as is
+
+def convert_lakhs_to_crores(df):
+    return df.applymap(convert_lakhs_to_crores_value)
+
+def replace_missing_values(df):
+    return df.replace({None: 0, 'None': 0, np.nan: 0})
+
+# Function to read the file and extract the required sheet
 def read_file(file, sheet_name):
     if file.type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
         df = pd.read_excel(file, sheet_name=None)
         if sheet_name in df.keys():
             df = pd.read_excel(file, sheet_name=sheet_name)
+            # Convert values from Lakhs to Crores
+            df = convert_lakhs_to_crores(df)  # Apply conversion to entire DataFrame
             return df, f"{file.name}_{sheet_name}"
         else:
-            st.error(f"The '{sheet_name}' sheet is not found in the uploaded file.")
+            #st.error(f"The '{sheet_name}' sheet is not found in the uploaded file.")
             return None, file.name
     else:
         st.error("Unsupported file type. Please upload an Excel file.")
         return None, file.name
 
-def extract_and_sort_quarters(df):
+# Function to extract and sort financial years
+def extract_and_sort_fy(df):
+    fy_pattern = re.compile(r'FY \d{2}-\d{2}$')
+    fys = [col for col in df.columns if fy_pattern.match(col)]
+    fys.sort(key=lambda x: int(x.split()[1].split('-')[0]))
+    return fys
+
+
+def extract_and_sort_quarters(column_names):
     quarter_pattern = re.compile(r'Q[1-4] \d{2}-\d{2}$')
-    quarters = [col for col in df.columns if quarter_pattern.match(col)]
-    quarters.sort(key=lambda x: (int(x.split()[1].split('-')[0]), x.split()[0][1]))
+    quarters = [col for col in column_names if quarter_pattern.match(col)]
+    
+    # Sort quarters first by the financial year, then by the quarter within that year
+    quarters.sort(key=lambda x: (int(x.split()[1].split('-')[0]), int(x.split()[1].split('-')[1]), x.split()[0]))
+    
     return quarters
 
+def process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set):
+    temp_data = pd.DataFrame(extracted_data, columns=["Heading", "Value1", "Value2"])
+    reformatted_date_columns = reformat_date_columns(extracted_date_columns)
+ 
+    for col in reformatted_date_columns:
+        if col not in final_data.columns:
+            final_data[col] = None
+            date_columns_set.add(col)
+ 
+    for index, row in temp_data.iterrows():
+        heading = row["Heading"]
+        for i, col in enumerate(reformatted_date_columns):
+            final_data.loc[final_data["Heading"] == heading, col] = row.iloc[i + 1]
+
+# Function to process the dataframe and filter it based on search term
 def process_dataframe(df, term, file_name):
     normalized_df = df.applymap(lambda x: x.strip().lower() if isinstance(x, str) else x)
     term_lower = term.lower()
     matching_rows = normalized_df[normalized_df.apply(lambda row: term_lower in row.values, axis=1)]
     if not matching_rows.empty:
         matching_rows.insert(0, 'File', file_name)
+        matching_rows = replace_missing_values(matching_rows)
         return matching_rows
     return pd.DataFrame()
 
-def generate_full_quarter_range(all_quarters, start_q, end_q):
-    start_index = all_quarters.index(start_q)
-    end_index = all_quarters.index(end_q) + 1  
-    return all_quarters[start_index:end_index]
 
-def filter_valid_quarters(quarters):
-    valid_quarters = [q for q in quarters if not re.search(r'\.\d+', q)]
-    return valid_quarters
 
-def forecast_and_plot(df, term, selected_quarters, col, add_legend=False, show_forecast=True):
-    combined_data = {}
-    for quarter in selected_quarters:
-        for idx, row in df.iterrows():
-            if quarter in row and pd.notna(row[quarter]):
-                combined_data[quarter] = row[quarter]
-                break
+# Function to generate the full range based on selected start and end
+def generate_full_range(all_items, start, end):
+    start_index = all_items.index(start)
+    end_index = all_items.index(end) + 1  
+    return all_items[start_index:end_index]
 
-    valid_quarters = list(combined_data.keys())
-    valid_values = list(combined_data.values())
-    quarters_numeric = np.arange(1, len(valid_quarters) + 1)
-    
-    if len(valid_values) > 1:
-        model = LinearRegression()
-        model.fit(quarters_numeric.reshape(-1, 1), valid_values)
-        
-        forecasts = []
-        if show_forecast:
-            for i in range(1, 4):
-                next_quarter = len(valid_quarters) + i
-                forecast = model.predict(np.array([[next_quarter]]))[0]
-                forecasts.append(forecast)
-        
-        forecast_values = np.append(valid_values, forecasts)
-        valid_quarters.extend(['Forecast1', 'Forecast2', 'Forecast3'] if show_forecast else [])
-        
-        colors = ['#75E2C9'] * len(valid_values) + (['#FFA500', '#800080', '#008080'] if show_forecast else [])
-        
-        highchart_html = f"""
-        <script src="https://code.highcharts.com/highcharts.js"></script>
-        <script src="https://code.highcharts.com/modules/zooming.js"></script>
-        <div id="container_{term.replace(' ', '_')}" style="width:100%; height:400px;"></div>
-        <script>
-            Highcharts.chart('container_{term.replace(' ', '_')}', {{
-                chart: {{
-                    zoomType: 'x',
-                    type: 'area'
-                }},
+
+
+def forecast_and_plot(df, term, selected_items, col, add_legend=False, chart_type='line'):
+    company_names = df['Company'].unique()
+    all_series = []
+
+    for company in company_names:
+        company_data = df[df['Company'] == company]
+
+        # Extracting and cleaning the data
+        valid_values = company_data.iloc[0, 1:].values.tolist()
+        filtered_values = [0 if pd.isna(value) else value for value in valid_values]
+        filtered_values = np.array(filtered_values).astype(np.float64)
+        filtered_items = list(selected_items[:len(filtered_values)])
+
+        # Debug statements to check data
+        #st.write(f"Debug: filtered_items for {company} = {filtered_items}")
+        #st.write(f"Debug: filtered_values for {company} = {filtered_values}")
+
+        if len(filtered_values) > 0:
+            series_data = {
+                'name': company,
+                'data': filtered_values.tolist(),
+                'dashStyle': 'Solid',
+                'dataLabels': {  # Enable data labels
+                    'enabled': True,
+                    'format': '{point.y:.2f}'  # Format to show two decimal places
+                }
+            }
+            all_series.append(series_data)
+
+    # Check if there's data to plot
+    if not all_series:
+        st.warning(f"No data available to plot for {term}.")
+        return
+
+    highchart_html = f"""
+    <script src="https://code.highcharts.com/highcharts.js"></script>
+    <script src="https://code.highcharts.com/modules/annotations.js"></script>
+    <div id="container_{term.replace(' ', '_')}" style="width:100%; height:500px;"></div>
+    <script>
+        Highcharts.chart('container_{term.replace(' ', '_')}', {{
+            chart: {{
+                zoomType: 'x',
+                type: '{chart_type}'
+            }},
+            title: {{
+                text: 'Data for {term}'
+            }},
+            subtitle: {{
+                text: 'Amount in ₹<br>₹ in Crores',
+                align: 'right',
+                verticalAlign: 'top',
+                style: {{
+                    fontSize: '10px'
+                }}
+            }},
+            xAxis: {{
+                type: 'datetime',
+                categories: {json.dumps(filtered_items)}
+            }},
+            yAxis: {{
                 title: {{
-                    text: 'Forecast for {term}'
-                }},
-                xAxis: {{
-                    type: 'datetime',
-                    categories: {json.dumps(valid_quarters)}
-                }},
-                yAxis: {{
-                    title: {{
-                        text: 'Value'
+                    text: 'Value'
+                }}
+            }},
+            series: {json.dumps(all_series)},
+            credits: {{
+                enabled: false
+            }},
+            plotOptions: {{
+                series: {{
+                    dataLabels: {{
+                        enabled: true
                     }}
-                }},
-                plotOptions: {{
-                    series: {{
-                        colorByPoint: true,
-                        marker: {{
-                            enabled: true
-                        }},
-                        fillColor: '#75E2C9'
-                    }}
-                }},
-                series: [{{
-                    name: '{term}',
-                    data: {json.dumps([{'y': v, 'color': c} for v, c in zip(forecast_values.tolist(), colors)])},
-                    color: '#75E2C9',
-                    dashStyle: 'ShortDash'
-                }}]
-            }});
-        </script>
-        """
-        with col:
-            if add_legend and show_forecast:
-                legend_html = """
-                <div style="margin-top: 10px; border: 1px solid #ddd; padding: 10px; display: inline-block;">
-                    <span style="color:#FFA500;">●</span> Forecast1
-                    <span style="color:#800080; margin-left: 10px;">●</span> Forecast2
-                    <span style="color:#008080; margin-left: 10px;">●</span> Forecast3
-                </div>
-                """
-                st.markdown(legend_html, unsafe_allow_html=True)
-            components.html(highchart_html, height=500)
-    else:
-        col.warning(f"Not enough data to forecast for {term}")
+                }}
+            }}
+        }});
+    </script>
+    """
+    with col:
+        components.html(highchart_html, height=500)
+
+
+
+
+def display_consolidated_balance_results(results, fys, chart_type):
+    valid_fys = sort_fy_columns(fys)  # Ensure FY columns are sorted
+    terms = list(results.keys())
+    
+    include_forecast = st.session_state.get('include_forecast_bs', False)
+
+    first_graph = True
+    for term in terms:
+        st.subheader(f"Results for {term}")
+        df = results[term].reindex(columns=['Company'] + valid_fys)
+        st.dataframe(df)
+
+        # Plotting
+        if not df.empty:
+            cols = st.columns(1)
+            forecast_and_plot(df, term, valid_fys, cols[0], add_legend=first_graph, chart_type=chart_type)
+            first_graph = False
+
+def aggregate_data_single_row_merged(search_terms, data_frames_info, selected_fys):
+    company_name = "sonata-software"
+    aggregate_results = {}
+
+    for term in search_terms:
+        row_data = {'Company': company_name}
+        for fy in selected_fys:
+            values = []
+            for df_info in data_frames_info:
+                df, file_name = df_info
+                if df is not None:
+                    processed_df = process_dataframe(df, term, file_name)
+                    if fy in processed_df.columns and not processed_df.empty:
+                        value = processed_df[fy].iloc[0] if pd.notna(processed_df[fy].iloc[0]) else 0
+                        values.append(value)
+            row_data[fy] = values[0] if values else 0
+        aggregate_results[term] = pd.DataFrame([row_data])
+
+    return aggregate_results
+
+
+
+# Ensure you only download and process files once
+def initialize_download_and_process():
+    # Path for the output Excel file
+    output_excel_file_path = "peers_data_bs_demo.xlsx"
+
+    # Check if the data has already been processed
+    if 'processed_data' not in st.session_state or 'fy_columns' not in st.session_state:
+        with st.spinner("Downloading and processing files..."):
+            # Define the companies and their respective units
+            companies = {
+                "TCS": "crores",
+                "WIPRO": "million",
+                "MPHASIS": "million",
+                "INFY": "crores",
+                "LTIM": "million",
+                "ZENSARTECH": "million",
+                "HCLTECH": "crores",
+                "COFORGE": "million"
+            }
+
+            # Define conversion factors for different units
+            conversion_factors = {
+                "crores": 1,          # Already in crores
+                "million": 0.1        # Convert from million to crores
+            }
+
+            # Create an Excel writer to save processed data
+            with pd.ExcelWriter(output_excel_file_path, engine='xlsxwriter') as writer:
+                for company, unit in companies.items():
+                    conversion_factor = conversion_factors[unit]
+                    company_name, all_files = download_files_once(company)
+
+                    if company_name:
+                        # Debug output for the number of files and their names
+                        #st.write(f"Debug: {len(all_files)} files to be processed for company: {company}")
+                        #st.write(f"Debug: Files for company {company}: {all_files}")
+
+                        # Map of required headings to their possible variations
+                        heading_map = {
+                            "Total non-current assets": ["Total non-current assets", "Total Non-current assets", "Total Non-Current Assets","Total non-current assets","Total non-current assets","Total Non-current assets"],
+                            "Total current assets": ["Total current assets", "Total Current Assets","otal current assets"],
+                            "Total assets": ["TOTAL ASSETS", "Total assets", "Total Assets","TOTAL ASSETS","TOTAL ASSETS","Total assets"],
+                            "Total Equity": ["Total equity", "Total Equity", "TOTAL EQUITY","TOTAL EQUITY","Total equity","Total Equity"],
+                            "Total non-current liabilities": ["Total non-current liabilities", "Total non- current liabilities", "Total Non-Current Liabilities","Total non-current liabilities","Total non-current liabilities", "Total non- current liabilities"],
+                            "Total current liabilities": ["Total current liabilities", "Total Current Liabilities","Total current liabilities","Total current liabilities"],
+                            "Total equity and liabilities": ["Total equity and liabilities", "Total Equity and Liabilities", "TOTAL EQUITY AND LIABILITIES","TOTAL EQUITY AND LIABILITIES","Total equity and liabilities"]
+                                
+                        }  
+
+                        # Initialize the final DataFrame with the required headings
+                        final_data = pd.DataFrame(columns=["Heading"] + list(heading_map.keys()))
+                        final_data["Heading"] = list(heading_map.keys())
+
+                        processed_files = set()
+                        date_columns_set = set()
+
+                        for file_name in all_files:
+                            file_path = os.path.join(company_name, file_name)
+
+                            if file_name.endswith(".zip"):
+                                # Handle ZIP file
+                                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                                    pdf_file_names = [file for file in zip_ref.namelist() if file.endswith('.pdf')]
+                                    for pdf_file_name in pdf_file_names:
+                                        if pdf_file_name not in processed_files:
+                                            with zip_ref.open(pdf_file_name) as pdf_file:
+                                                extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, pdf_file_name)
+                                                if extracted_data and extracted_date_columns:
+                                                    process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
+                                                    processed_files.add(pdf_file_name)
+                            elif file_name.endswith(".pdf"):
+                                # Handle PDF file
+                                if file_name not in processed_files:
+                                    #st.write(f"Debug: Attempting to process file: {file_name}")
+                                    with open(file_path, 'rb') as pdf_file:
+                                        extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, file_name)
+                                        if extracted_data and extracted_date_columns:
+                                            process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
+                                            processed_files.add(file_name)
+                                        else:
+                                            st.write(f"Debug: No data extracted from file: {file_name}")
+
+                        # Remove the initialized columns used for structure
+                        final_data = final_data.drop(columns=list(heading_map.keys()), axis=1, errors='ignore')
+
+                        # Sort the columns based on the year extracted from the column names
+                        columns_sorted = ["Heading"] + sorted(list(date_columns_set), key=extract_year)
+                        final_data = final_data[columns_sorted]
+
+                        # Add a new row at the top for financial year values
+                        financial_year_row = ["Financial Year"] + [calculate_financial_year(col) for col in columns_sorted[1:]]
+                        final_data.loc[-1] = financial_year_row  # Add the row at the start
+                        final_data.index = final_data.index + 1  # Shift index by 1
+                        final_data = final_data.sort_index()  # Sort the index
+
+                        # Write the DataFrame to an Excel sheet
+                        final_data.to_excel(writer, sheet_name=company, index=False, header=False)
+
+            # Load the processed Excel file into session state
+            processed_data, fy_columns = load_and_process_data(output_excel_file_path)
+            st.session_state['processed_data'] = processed_data
+            st.session_state['fy_columns'] = fy_columns
+
+# Ensure the initialization is done only once
+initialize_download_and_process()
+
+
+# Function for Balance Sheet Page
+def filter_none_rows(df):
+    # Keep only rows where at least one of the financial year columns is not None
+    fy_columns = [col for col in df.columns if col.startswith('FY')]
+    df_filtered = df.dropna(subset=fy_columns, how='all')
+    return df_filtered
+
+def sort_fy_columns(fy_columns):
+    # Filter out any columns that do not match the FY format
+    fy_columns_filtered = [fy for fy in fy_columns if re.match(r'^FY \d{2}-\d{2}$', fy)]
+    
+    # Add a debug statement to see what columns are being processed
+    #st.write("Debug: Columns being processed for sorting:", fy_columns_filtered)
+    
+    # Proceed with sorting only the filtered columns
+    fy_years = [int(fy.split()[1].split('-')[0]) for fy in fy_columns_filtered]
+    sorted_indices = sorted(range(len(fy_years)), key=lambda k: fy_years[k])
+    
+    return [fy_columns_filtered[i] for i in sorted_indices]
 
 
 
 
 def balance_sheet_page():
+    term_data_dict = {}
     uploaded_files = st.sidebar.file_uploader("Choose Excel files for BS & PL", type='xlsx', accept_multiple_files=True, key='balance_files')
 
     if uploaded_files:
-        st.session_state['uploaded_files'] = uploaded_files
-        response = requests.post('https://financialstatementsforecast.azurewebsites.net/api/upload_bs?code=TVKPGisBDr9ja98dZqvDCrIuy32rZYSpoPsVIxrnlLH0AzFuNjkkrQ%3D%3D', files=[('files', (file.name, file, file.type)) for file in uploaded_files])
-        
+        if 'uploaded_files' not in st.session_state:
+            st.session_state['uploaded_files'] = []
+        # Add newly uploaded files to session state
+        for file in uploaded_files:
+            if file not in st.session_state['uploaded_files']:
+                st.session_state['uploaded_files'].append(file)
+                st.session_state['balance_files_processed'] = False  # Mark as not processed
+
+    if 'merged_df1' not in st.session_state:
+        st.session_state['merged_df1'] = {}
+
+    # Display the uploaded files and allow removal
     if st.session_state['uploaded_files']:
         with st.sidebar.expander("View Uploaded Files"):
             for i, file in enumerate(st.session_state['uploaded_files']):
@@ -232,380 +707,689 @@ def balance_sheet_page():
                 col1.write(file.name)
                 if col2.button("X", key=f"remove_balance_{i}"):
                     st.session_state['uploaded_files'].pop(i)
+                    st.session_state['balance_files_processed'] = False  # Mark as not processed
                     st.rerun()
 
-    if st.session_state['uploaded_files']:
-        if st.sidebar.button('Process Files'):
-            data_frames_info = [read_file(file, 'BS') for file in st.session_state['uploaded_files']]
-            if all(df_info[0] is not None for df_info in data_frames_info):
-                st.session_state['balance_data_frames'] = data_frames_info
-                st.session_state['balance_files_processed'] = True
-                st.rerun()
+    # Automatically process files when they are uploaded or deleted
+    if not st.session_state.get('balance_files_processed') and st.session_state['uploaded_files']:
+        with st.spinner("Processing files..."):
+            data_frames_info = []
+            for file in st.session_state['uploaded_files']:
+                try:
+                    df_info = read_file(file, 'BS_Y')
+                    if df_info[0] is None:
+                        st.error(f"The file {file.name} does not contain the required sheet 'BS_Y'. Please upload a file with the correct sheet name.")
+                        return
+                    data_frames_info.append(df_info)
+                except Exception as e:
+                    st.error(f"Error processing {file.name}: {e}")
+                    return
+
+            st.session_state['balance_data_frames'] = data_frames_info
+            st.session_state['balance_files_processed'] = True
+            st.rerun()
 
     if st.session_state.get('balance_files_processed'):
-        quarters = set()
+        fys = set()
         for df_info in st.session_state['balance_data_frames']:
             df, _ = df_info
-            quarters.update(extract_and_sort_quarters(df))
-        quarters = sorted(quarters, key=lambda x: (int(x.split()[1].split('-')[0]), x.split()[0][1]))
+            fys.update(extract_and_sort_fy(df))
+        fys = sorted(fys, key=lambda x: int(x.split()[1].split('-')[0]))
 
-        if quarters and st.session_state['balance_quarters_range'] is None:
-            st.session_state['balance_quarters_range'] = (quarters[0], quarters[-1])
-        
-        if st.session_state['balance_quarters_range'] is not None:
-            selected_quarter_range = st.select_slider("Select Quarter Range", options=quarters, value=st.session_state['balance_quarters_range'], key='balance_quarters_range')
-            if selected_quarter_range:
-                selected_quarters = generate_full_quarter_range(quarters, selected_quarter_range[0], selected_quarter_range[1])
+        if fys and st.session_state['balance_fy_range'] is None:
+            st.session_state['balance_fy_range'] = (fys[0], fys[-1])
+
+        col1, col2 = st.columns(2)
+        peer_comparison_enabled = st.checkbox("Peer Comparison")
+
+        selected_fys = []
+        if peer_comparison_enabled:
+            selected_fys = fys
+        else:
+            selected_fy_range = st.select_slider("Select Financial Year Range", options=fys, value=st.session_state['balance_fy_range'], key='balance_fy_range')
+            if selected_fy_range:
+                selected_fys = generate_full_range(fys, selected_fy_range[0], selected_fy_range[1])
+
+        search_terms = ["Total non-current assets", "Total current assets", "Total assets", "Total Equity", "Total non-current liabilities", "Total current liabilities", "Total equity and liabilities"]
+        selected_search_terms = st.multiselect("Select Search Terms", options=search_terms, default=search_terms, key='balance_terms')
+
+        if st.button('Show Results', key='balance_show_results'):
+            results = aggregate_data_single_row_merged(selected_search_terms, st.session_state['balance_data_frames'], selected_fys)
+            st.session_state['balance_results'] = results
+            st.session_state['sorted_balance_fys'] = selected_fys
+
+            if peer_comparison_enabled:
+                st.subheader("Peer Comparison")
+                for term in selected_search_terms:
+                    # Extract peer data and sonata data for the term
+                    peer_data_df = display_data_for_heading(st.session_state['processed_data'], term, st.session_state['fy_columns'])
+                    peer_data_df = peer_data_df.fillna(0)  # Replace NaN values with zero
+                    sonata_data_df = st.session_state['balance_results'][term]
+
+                    # Extract ZENSARTECH data from peer_data_df
+                    zensartech_data = peer_data_df[peer_data_df['Company'] == 'ZENSARTECH']
+                    if not zensartech_data.empty:
+                        # Add ZENSARTECH data to sonata_data_df
+                        sonata_data_df = pd.concat([sonata_data_df, zensartech_data])
+
+                    # Extract the columns from sonata_data_df that match the columns in peer_data_df
+                    sonata_columns = [col for col in peer_data_df.columns if col in sonata_data_df.columns and col != 'Company']
+
+                    # Initialize missing columns in sonata_data_df as zeros if they are in peer_data_df but not in sonata_data_df
+                    missing_columns = [col for col in peer_data_df.columns if col not in sonata_data_df.columns and col != 'Company']
+                    for col in missing_columns:
+                        sonata_data_df[col] = 0
+
+                    # Ensure 'Company' is added only once at the start
+                    sonata_data_df = sonata_data_df[['Company'] + sonata_columns + missing_columns]
+
+                    # Merge the data
+                    merged_df1 = pd.concat([sonata_data_df, peer_data_df], ignore_index=True)
+
+                    if "ZENSARTECH" in merged_df1['Company'].values:
+                        zensartech_data = merged_df1[merged_df1['Company'] == "ZENSARTECH"]
+                        for fy in ['FY 19-20', 'FY 20-21']:
+                            if fy in zensartech_data.columns:
+                                original_value = zensartech_data[fy].values
+                                adjusted_value = original_value * 0.1
+                                zensartech_data[fy] = adjusted_value
+                        merged_df1.update(zensartech_data)
+
+                    # Filter out rows with only None values in FY columns
+                    merged_df1 = filter_none_rows(merged_df1)
+
+                    st.session_state['merged_df1'][term] = merged_df1
+                    
+                    term_data_dict[term] = merged_df1
+                    st.dataframe(merged_df1)
+                    # Plot the merged data
+                    cols = st.columns(1)
+                    forecast_and_plot(merged_df1, term, merged_df1.columns[1:], cols[0], add_legend=False, chart_type='line')
+                    st.markdown("**Note:** Data indicating zero may imply that the data is not present or not extracted due to improper headings.")
+                
             else:
-                selected_quarters = []
+                display_consolidated_balance_results(st.session_state['balance_results'], st.session_state['sorted_balance_fys'], chart_type='area')
 
-            search_terms = ["Total non-current assets", "Total current assets", "Total assets", "Total Equity", "Total non-current liabilities", "Total current liabilities", "Total equity and liabilities"]
-            selected_search_terms = st.multiselect("Select Search Terms", options=search_terms, default=search_terms, key='balance_terms')
+            
 
-            if st.button('Show Results', key='balance_show_results'):
-                last_extracted_quarter = quarters[-1] if quarters else None
-                st.session_state['include_forecast_bs'] = last_extracted_quarter == selected_quarters[-1] if selected_quarters else False
-                results, sorted_quarters = aggregate_data_bs(selected_search_terms, st.session_state['balance_data_frames'], selected_quarters)
-                st.session_state['balance_results'] = results
-                st.session_state['sorted_balance_quarters'] = sorted_quarters
+def calculate_quarter(date):
+    month = date.month
+    year = date.year
+    if month in [1, 2, 3]:
+        quarter = 'Q4'
+        financial_year = f'{str(year-1)[-2:]}-{str(year)[-2:]}'
+    elif month in [4, 5, 6]:
+        quarter = 'Q1'
+        financial_year = f'{str(year)[-2:]}-{str(year+1)[-2:]}'
+    elif month in [7, 8, 9]:
+        quarter = 'Q2'
+        financial_year = f'{str(year)[-2:]}-{str(year+1)[-2:]}'
+    else:
+        quarter = 'Q3'
+        financial_year = f'{str(year)[-2:]}-{str(year+1)[-2:]}'
+    return f'{quarter} {financial_year}'
 
-    if st.session_state.get('balance_results'):
-        display_balance_results(st.session_state['balance_results'], st.session_state['sorted_balance_quarters'])
+def initialize_session(symbol):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.3',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Referer': f'https://www.nseindia.com/get-quotes/equity?symbol={symbol}',
+        'DNT': '1',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin'
+    }
 
-def aggregate_data_bs(search_terms, data_frames_info, selected_quarters):
-    aggregate_results = {term: pd.DataFrame() for term in search_terms}
-    all_quarters = []
+    session = requests.Session()
+    session.headers.update(headers)
 
-    for df_info in data_frames_info:
-        df, file_name = df_info
-        if df is not None:
-            current_quarters = extract_and_sort_quarters(df)
-            filtered_quarters = [q for q in current_quarters if q in selected_quarters]
-            all_quarters.extend(filtered_quarters)
-            for term in search_terms:
-                processed_df = process_dataframe(df, term, file_name)
-                if not processed_df.empty:
-                    available_columns = ['File'] + filtered_quarters
-                    processed_df = processed_df.reindex(columns=available_columns, fill_value=None)
-                    aggregate_results[term] = pd.concat([aggregate_results[term], processed_df], ignore_index=True)
+    init_url = f"https://www.nseindia.com/get-quotes/equity?symbol={symbol}"
+    response = session.get(init_url)
 
-    all_quarters = sorted(list(set(all_quarters)), key=lambda x: (int(x.split()[1].split('-')[0]), x.split()[0][1]))
-    return aggregate_results, all_quarters
+    if response.status_code == 200:
+        return session
+    else:
+        st.error("Failed to initialize session.")
+        return None
 
-
-
-
-def display_balance_results(results, quarters):
-    valid_quarters = filter_valid_quarters(quarters)
-    terms = list(results.keys())
-    num_terms = len(terms)
+def fetch_nse_financial_results(symbol, session):
+    url = f"https://www.nseindia.com/api/corporates-financial-results?index=equities&symbol={symbol}&period=Quarterly"
+    response = session.get(url)
     
-    include_forecast = st.session_state.get('include_forecast_bs', False)
+    if response.status_code == 200:
+        try:
+            return response.json()
+        except ValueError:
+            st.error("Response content is not valid JSON.")
+            st.write(response.text)
+            return None
+    else:
+        st.error(f"Failed to fetch data for {symbol}. HTTP Status Code: {response.status_code}")
+        st.write(response.text)
+        return None
 
-    first_graph = True
-    for i in range(0, num_terms, 2):
-        cols = st.columns(2)
+def create_financial_result_links(data):
+    links = []
+    
+    for item in data:
+        symbol = item.get("symbol", "")
+        from_date = item.get("fromDate", "")
+        to_date = item.get("toDate", "")
+        seq_number = item.get("seqNumber", "")
+        quarter = get_quarter_from_date(to_date)
         
-        if i < num_terms:
-            with cols[0]:
-                if not results[terms[i]].empty:
-                    forecast_and_plot(results[terms[i]], terms[i], valid_quarters, cols[0], add_legend=first_graph, show_forecast=include_forecast)
-                    first_graph = False
-                else:
-                    st.write(f"No data found for {terms[i]}")
-        
-        if i + 1 < num_terms:
-            with cols[1]:
-                if not results[terms[i + 1]].empty:
-                    forecast_and_plot(results[terms[i + 1]], terms[i + 1], valid_quarters, cols[1], show_forecast=include_forecast)
-                else:
-                    st.write(f"No data found for {terms[i + 1]}")
+        if symbol and from_date and to_date and quarter and seq_number:
+            url = (
+                f"https://www.nseindia.com/api/corporates-financial-results-data?"
+                f"index=equities&params={from_date}{to_date}{quarter}ANNCNE{symbol}&seq_id={seq_number}"
+                "&industry=-&frOldNewFlag=N&ind=N&format=New"
+            )
+            links.append(url)
+    
+    return links
 
-    # st.subheader("Balance Sheet Data Tables")
-    # for term, df in results.items():
-    #     df = df.reindex(columns=['File'] + valid_quarters)
-    #     st.write(f"Results for {term}")
-    #     st.dataframe(df)
+def get_quarter_from_date(to_date):
+    try:
+        date_obj = datetime.strptime(to_date, '%d-%b-%Y')
+        return calculate_quarter(date_obj)
+    except ValueError:
+        return "N/A"
+
+def filter_data_by_year_and_consolidated(data, max_results=8):
+    filtered_data = []
+    seen_xbrl = set()
+    
+    for item in data:
+        if len(filtered_data) >= max_results:
+            break
+        try:
+            consolidated_status = item.get("consolidated", "")
+            xbrl_url = item.get("xbrl", "")
+
+            if consolidated_status == "Consolidated" and xbrl_url not in seen_xbrl:
+                filtered_data.append(item)
+                seen_xbrl.add(xbrl_url)
+        except ValueError:
+            continue
+    
+    return filtered_data
+
+def fetch_financial_result_details(url, session):
+    response = session.get(url)
+    
+    if response.status_code == 200:
+        try:
+            return response.json()
+        except ValueError:
+            st.error("Response content is not valid JSON.")
+            st.write(response.text)
+            return None
+    elif response.status_code == 401:
+        st.error("Unauthorized access. Ensure that session is properly initialized and headers are correct.")
+    else:
+        st.error(f"Failed to fetch data. HTTP Status Code: {response.status_code}")
+        st.write(response.text)
+        return None
+
+def extract_required_fields(details, quarter, symbol):
+    extracted_data = {
+        "Company": symbol,
+        "Quarter": quarter,
+        "Total Income": details.get("re_total_inc"),
+        "Total expenses": details.get("re_oth_tot_exp"),
+        "Net tax expense": details.get("re_tax"),
+        "Profit for the year": details.get("re_con_pro_loss"),
+        "Revenue from operations": details.get("re_net_sale"),
+        "Finance costs": details.get("re_int_new"),
+        "Depreciation and amortization expense": details.get("re_depr_und_exp"),
+        "Profit before exceptional item and tax": details.get("re_pro_bef_int_n_excep"),
+        "Basic (₹)": details.get("re_basic_eps_for_cont_dic_opr"),
+    }
+    return extracted_data
+
+
+
+def pivot_data_to_format(results_quarters, selected_search_terms_quarters):
+    formatted_data = {}
+    
+    for term in selected_search_terms_quarters:
+        if term in results_quarters:
+            df = results_quarters[term]
+            
+            # Convert the 'Value' column to numeric, forcing non-numeric values to NaN
+            df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+            
+            # Pivot the DataFrame to have Companies as rows and Quarters as columns
+            df_pivot = df.pivot_table(index='Company', columns='Quarter', values='Value', aggfunc='sum')
+            
+            # Ensure the columns (quarters) are sorted correctly
+            sorted_quarters = extract_and_sort_quarters(df_pivot.columns)
+            df_pivot = df_pivot[sorted_quarters]
+            
+            formatted_data[term] = df_pivot
+    
+    return formatted_data
 
 def profit_loss_page():
-    uploaded_files = st.sidebar.file_uploader("Choose Excel files for BS & PL", type='xlsx', accept_multiple_files=True, key='profit_files')
+    # Centralize file upload handling and data processing
+    term_data_dict = {}  # Dictionary to hold data for each term
+
+    uploaded_files = st.sidebar.file_uploader("Choose Excel files for BS & PL", type='xlsx', accept_multiple_files=True, key='pl_files')
 
     if uploaded_files:
-        st.session_state['uploaded_files'] = uploaded_files
-        response = requests.post('https://financialstatementsforecast.azurewebsites.net/api/upload_pl?code=97sBzFGS2wx3UlJPaovVxxkrn-JLPcOA_jXXwBYb6UKPAzFusqIkFg%3D%3D', files=[('files', (file.name, file, file.type)) for file in uploaded_files])
-    
+        if 'uploaded_files' not in st.session_state:
+            st.session_state['uploaded_files'] = []
+        # Add newly uploaded files to session state
+        for file in uploaded_files:
+            if file not in st.session_state['uploaded_files']:
+                st.session_state['uploaded_files'].append(file)
+                st.session_state['pl_files_processed'] = False  # Mark as not processed
+
+    # Display the uploaded files and allow removal
     if st.session_state['uploaded_files']:
         with st.sidebar.expander("View Uploaded Files"):
             for i, file in enumerate(st.session_state['uploaded_files']):
                 col1, col2 = st.columns([8, 2])
                 col1.write(file.name)
-                if col2.button("X", key=f"remove_profit_{i}"):
+                if col2.button("X", key=f"remove_pl_{i}"):
                     st.session_state['uploaded_files'].pop(i)
+                    st.session_state['pl_files_processed'] = False  # Mark as not processed
                     st.rerun()
-    
-    if st.session_state['uploaded_files']:
-        if st.sidebar.button('Process Files'):
-            data_frames_info = [read_file(file, 'PL') for file in st.session_state['uploaded_files']]
-            if all(df_info[0] is not None for df_info in data_frames_info):
-                st.session_state['profit_data_frames'] = data_frames_info
-                st.session_state['profit_files_processed'] = True
+
+    # Automatically process files when they are uploaded, removed, or when the page loads
+    if not st.session_state.get('pl_files_processed') and st.session_state['uploaded_files']:
+        with st.spinner("Processing files..."):
+            data_frames_info = []
+            sheet_present = True
+            for file in st.session_state['uploaded_files']:
+                try:
+                    df_info = read_file(file, 'PL_Q')
+                    if df_info[0] is None:
+                        st.error(f"The file {file.name} does not contain the required sheet 'PL_Q'. Please upload a file with the correct sheet name.")
+                        sheet_present = False
+                        break
+                    data_frames_info.append(df_info)
+                except Exception as e:
+                    st.error(f"Error processing {file.name}: {e}")
+                    return
+
+            if sheet_present:
+                st.session_state['pl_data_frames'] = data_frames_info
+                st.session_state['pl_files_processed'] = True
                 st.rerun()
 
-    if st.session_state.get('profit_files_processed'):
+    if st.session_state.get('pl_files_processed'):
+        # Fetch and store NSE data if not already done
+        if 'nse_data_processed' not in st.session_state:
+            with st.spinner("Fetching NSE data..."):
+                fetch_and_store_nse_data()
+
         quarters = set()
-        for df_info in st.session_state['profit_data_frames']:
+        for df_info in st.session_state['pl_data_frames']:
             df, _ = df_info
-            quarters.update(extract_and_sort_quarters(df))
+            quarters.update(extract_and_sort_quarters(df.columns))
+
         quarters = sorted(quarters, key=lambda x: (int(x.split()[1].split('-')[0]), x.split()[0][1]))
-        
-        if quarters and st.session_state['profit_quarters_range'] is None:
-            st.session_state['profit_quarters_range'] = (quarters[0], quarters[-1])
 
-        if st.session_state['profit_quarters_range'] is not None:
-            selected_quarter_range = st.select_slider("Select Quarter Range", options=quarters, value=st.session_state['profit_quarters_range'], key='profit_quarters_range')
+        if quarters and st.session_state['pl_fy_range'] is None:
+            st.session_state['pl_fy_range'] = (quarters[0], quarters[-1])
+
+        peer_comparison_enabled = st.checkbox("Peer Comparison")
+
+        # Only display the quarter range slider when peer comparison is disabled
+        selected_quarters = []
+        if peer_comparison_enabled:
+            selected_quarters = quarters  # Use all available quarters when Peer Comparison is enabled
+        else:
+            selected_quarter_range = st.select_slider(
+                "Select Quarter Range",
+                options=quarters,
+                value=st.session_state['pl_fy_range'],
+                key='pl_fy_range',
+                disabled=peer_comparison_enabled  # Disable when peer comparison is enabled
+            )
             if selected_quarter_range:
-                selected_quarters = generate_full_quarter_range(quarters, selected_quarter_range[0], selected_quarter_range[1])
+                selected_quarters = generate_full_range(quarters, selected_quarter_range[0], selected_quarter_range[1])
+
+        all_search_terms_quarters = [
+            "Total Income", "Total expenses", "Net tax expense", "Profit for the year",
+            "Revenue from operations", "Finance costs", "Depreciation and amortization expense",
+            "Profit before exceptional item and tax", "Basic (₹)"
+        ]
+
+        selected_search_terms_quarters = st.multiselect(
+            "Select Search Terms for Quarters",
+            options=all_search_terms_quarters,
+            default=all_search_terms_quarters
+        )
+
+        # Initialize df_combined in session state if not already present
+        if 'df_combined' not in st.session_state:
+            st.session_state['df_combined'] = {}
+
+        if peer_comparison_enabled:
+            if st.button('Show Results', key='show_results_peer'):
+                # Use the pre-fetched and processed NSE data from session state
+                nse_data = st.session_state['nse_results_quarters']
+
+                # Pivot the data to the desired format
+                formatted_data = pivot_data_to_format(nse_data, selected_search_terms_quarters)
+
+                # Retrieve sonata_data from session state (ensure it exists first)
+                sonata_data = aggregate_data_single_row_merged(selected_search_terms_quarters, st.session_state['pl_data_frames'], selected_quarters)
+
+                for term, df in formatted_data.items():
+                    st.subheader(f"Peer Comparison - Quarter-based: {term}")
+                    
+                    df = df.reset_index()
+                    df = convert_lakhs_to_crores(df)
+
+                    # Combine Sonata data and peers' data, removing duplicates
+                    sonata_columns = [col for col in df.columns if col in sonata_data[term].columns and col != 'Company']
+                    peer_columns = [col for col in df.columns if col not in sonata_data[term].columns and col != 'Company']
+                    
+                    unique_columns = ['Company'] + sonata_columns + peer_columns
+
+                    if term in sonata_data:
+                        sonata_data[term] = sonata_data[term].reindex(columns=unique_columns, fill_value=0)
+                    df = df.reindex(columns=unique_columns, fill_value=0)
+
+                    # Concatenate the data
+                    df_combined = pd.concat([sonata_data.get(term, pd.DataFrame()), df], axis=0, ignore_index=True)
+                    st.session_state['df_combined'][term] = df_combined
+
+                    # Display the combined DataFrame
+                    st.dataframe(df_combined)
+                    
+                    # Collect the DataFrame in the dictionary
+                    term_data_dict[term] = df_combined
+
+                    # Forecast and plot if peer comparison is enabled
+                    st.subheader(f"Forecast for {term}")
+                    cols = st.columns(1)
+                    forecast_and_plot(df_combined, term, df_combined.columns[1:], cols[0], add_legend=False, chart_type='line')
+                    st.markdown("**Note:** Data indicating zero may imply that the data is not present or not extracted due to improper headings.")
+
+        else:
+            if st.button('Show Results', key='show_results_no_peer'):
+                results_quarters = aggregate_data_single_row_merged(selected_search_terms_quarters, st.session_state['pl_data_frames'], selected_quarters)
+                
+                st.session_state['pl_results_quarters'] = results_quarters
+                st.session_state['sorted_pl_quarters'] = selected_quarters
+
+                # Display the results without peer comparison
+                display_consolidated_pl_results_quarters(st.session_state['pl_results_quarters'], st.session_state['sorted_pl_quarters'], chart_type='area')
+                
+                # Collect the DataFrame in the dictionary for non-peer comparison
+                for term, df in st.session_state['pl_results_quarters'].items():
+                    term_data_dict[term] = df
+
+
+
+# Function to fetch and store NSE data upfront
+def fetch_and_store_nse_data():
+    symbols = ['TCS', 'INFY', 'HCLTECH','LTIM', 'WIPRO', 'COFORGE', 'PERSISTENT', 'MPHASIS', 'ZENSARTECH', 'BSOFT']
+    all_data = {term: [] for term in ["Total Income", "Total expenses", "Net tax expense", "Profit for the year",
+                                      "Revenue from operations", "Finance costs", "Depreciation and amortization expense",
+                                      "Profit before exceptional item and tax", "Basic (₹)"]}
+
+    for symbol in symbols:
+        session = initialize_session(symbol)
+        if session:
+            financial_results = fetch_nse_financial_results(symbol, session)
+            if financial_results:
+                filtered_data = filter_data_by_year_and_consolidated(financial_results)
+                links = create_financial_result_links(filtered_data)
+
+                for idx, link in enumerate(links):
+                    details = fetch_financial_result_details(link, session)
+                    if details and "resultsData2" in details:
+                        to_date = filtered_data[idx].get("toDate", "N/A")
+                        quarter = get_quarter_from_date(to_date)
+                        extracted_data = extract_required_fields(details["resultsData2"], quarter, symbol)
+                        if extracted_data:
+                            for key, value in extracted_data.items():
+                                if key == "Quarter" or key == "Company":
+                                    continue
+                                all_data[key].append({"Quarter": extracted_data["Quarter"], "Company": symbol, "Value": value})
+
+    # Convert to DataFrames and set index to 'Quarter' and 'Company'
+    results_quarters = {}
+    for key, data in all_data.items():
+        if data:
+            result_df = pd.DataFrame(data)
+            if 'Quarter' in result_df.columns and 'Company' in result_df.columns:
+                result_df.set_index(['Quarter', 'Company'], inplace=True)
             else:
-                selected_quarters = []
+                st.warning(f"No 'Quarter' or 'Company' column found in the data for {key}. Skipping this term.")
+                continue
 
-            search_terms = ["Total Income", "Total expenses", "Profit before exceptional item and tax", "Profit for the year"]
-            selected_search_terms = st.multiselect("Select Search Terms", options=search_terms, default=search_terms, key='profit_terms')
+            results_quarters[key] = result_df
 
-            if st.button('Show Results', key='profit_show_results'):
-                last_extracted_quarter = quarters[-1] if quarters else None
-                st.session_state['include_forecast_pl'] = last_extracted_quarter == selected_quarters[-1] if selected_quarters else False
-                results, sorted_quarters, sorted_fy = aggregate_data_pl(selected_search_terms, st.session_state['profit_data_frames'], selected_quarters)
-                st.session_state['profit_results'] = results
-                st.session_state['sorted_profit_quarters'] = sorted_quarters
-                st.session_state['sorted_profit_fy'] = sorted_fy
-
-    if st.session_state.get('profit_results'):
-        display_profit_results(st.session_state['profit_results'], st.session_state['sorted_profit_quarters'], st.session_state['sorted_profit_fy'])
+    st.session_state['nse_results_quarters'] = results_quarters
+    st.session_state['nse_data_processed'] = True
 
 
-def aggregate_data_pl(search_terms, data_frames_info, selected_quarters):
-    aggregate_results = {term: pd.DataFrame() for term in search_terms}
-    all_quarters = []
-    all_fy = []
-
-    for df_info in data_frames_info:
-        df, file_name = df_info
-        if df is not None:
-            current_quarters = extract_and_sort_quarters(df)
-            filtered_quarters = [q for q in current_quarters if q in selected_quarters]
-            all_quarters.extend(filtered_quarters)
-            
-            fy_pattern = re.compile(r'FY \d{2}-\d{2}$')
-            fy_columns = [col for col in df.columns if fy_pattern.match(col)]
-            fy_columns = sorted(fy_columns, key=lambda x: int(x.split()[1].split('-')[0]))
-            all_fy.extend(fy_columns)
-            
-            for term in search_terms:
-                processed_df = process_dataframe(df, term, file_name)
-                if not processed_df.empty:
-                    if term == "Profit for the year":
-                        available_columns = ['File'] + fy_columns
-                    else:
-                        available_columns = ['File'] + filtered_quarters
-                    processed_df = processed_df.reindex(columns=available_columns, fill_value=None)
-                    aggregate_results[term] = pd.concat([aggregate_results[term], processed_df], ignore_index=True)
-
-    all_quarters = sorted(list(set(all_quarters)), key=lambda x: (int(x.split()[1].split('-')[0]), x.split()[0][1]))
-    all_fy = sorted(list(set(all_fy)), key=lambda x: int(x.split()[1].split('-')[0]))
-    return aggregate_results, all_quarters, all_fy
-
-
-def display_profit_results(results, quarters, fy_columns):
-    valid_quarters = filter_valid_quarters(quarters)
+def display_consolidated_pl_results_quarters(results, quarters, chart_type):
+    valid_quarters = extract_and_sort_quarters(quarters)  # Ensure Quarters are sorted
     terms = list(results.keys())
-    num_terms = len(terms)
-
-    last_extracted_quarter = valid_quarters[-1] if valid_quarters else None
+    
     include_forecast = st.session_state.get('include_forecast_pl', False)
 
     first_graph = True
-    for i in range(0, num_terms, 2):
-        cols = st.columns(2)
+    for term in terms:
+        st.subheader(f"Results for {term}")
+        df = results[term].reindex(columns=['Company'] + valid_quarters)
+        st.dataframe(df)
 
-        if i < num_terms:
-            with cols[0]:
-                if not results[terms[i]].empty:
-                    show_forecast = include_forecast if terms[i] != "Profit for the year" else True
-                    forecast_and_plot(results[terms[i]], terms[i], fy_columns if terms[i] == "Profit for the year" else valid_quarters, cols[0], add_legend=first_graph, show_forecast=show_forecast)
-                    first_graph = False
-                else:
-                    st.write(f"No data found for {terms[i]}")
-
-        if i + 1 < num_terms:
-            with cols[1]:
-                if not results[terms[i + 1]].empty:
-                    show_forecast = include_forecast if terms[i + 1] != "Profit for the year" else True
-                    forecast_and_plot(results[terms[i + 1]], terms[i + 1], fy_columns if terms[i + 1] == "Profit for the year" else valid_quarters, cols[1], show_forecast=show_forecast)
-                else:
-                    st.write(f"No data found for {terms[i + 1]}")
-
-    # st.subheader("Profit & Loss Tables")
-    # for term, df in results.items():
-    #     if term == "Profit for the year":
-    #         df = df.reindex(columns=['File'] + fy_columns)
-    #     else:
-    #         df = df.reindex(columns=['File'] + valid_quarters)
-    #     st.write(f"Results for {term}")
-    #     st.dataframe(df)
+        # Plotting
+        if not df.empty:
+            cols = st.columns(1)
+            forecast_and_plot(df, term, valid_quarters, cols[0], add_legend=first_graph, chart_type=chart_type)
+            first_graph = False
 
 def kpi_page():
-    uploaded_files = st.sidebar.file_uploader("Choose Excel files for KPI", type='xlsx', accept_multiple_files=True, key='kpi_files')
+    kpi_data_dict = {}  # Dictionary to hold data for each KPI
 
-    if uploaded_files:
-        for file in uploaded_files:
-            if file not in st.session_state['kpi_uploaded_files']:
-                st.session_state['kpi_uploaded_files'].append(file)
-                response = requests.post('https://financialstatementsforecast.azurewebsites.net/api/upload_kpi?code=BQchLjkFc7rclRAPocLWiYhzehL3Hzqj1HKTr2VmHMENAzFugVBFvA%3D%3D', files={'file': (file.name, file, file.type)})
+    st.subheader("Key Performance Indicators (KPIs)")
 
-    if st.session_state['kpi_uploaded_files']:
-        with st.sidebar.expander("View Uploaded Files"):
-            for i, file in enumerate(st.session_state['kpi_uploaded_files']):
-                col1, col2 = st.columns([8, 2])
-                col1.write(file.name)
-                if col2.button("X", key=f"remove_kpi_{i}"):
-                    st.session_state['kpi_uploaded_files'].pop(i)
-                    st.rerun()
+    peer_comparison_enabled = st.checkbox("Peer Comparison")
+    #include_forecast_kpi = st.checkbox("Include Forecast", key='include_forecast_KPI')
 
-    if st.session_state['kpi_uploaded_files']:
-        if st.sidebar.button('Process KPI Files'):
-            data_frames = []
-            for file in st.session_state['kpi_uploaded_files']:
-                data = pd.read_excel(file, sheet_name='PL')
-                data_frames.append(data)
-            st.session_state['kpi_data'] = pd.concat(data_frames, ignore_index=True)
-            st.session_state['kpi_file_processed'] = True
-            st.rerun()
-
-    if st.session_state.get('kpi_file_processed'):
-        data = st.session_state['kpi_data']
-        if data is not None and not data.empty:
-            required_kpis = [
-                "Net Sales", "EBITDA", "PAT", "Net Worth", "Debt", "Debtors",
-                "Cash", "EPS", "EBITDA Margin", "Net Profit Margin", "RoE/RONW",
-                "RoCE", "EBIT", "Net Assets", "Gross Margin"
+    # Show KPI Results Button
+    if st.button('Show KPI Results'):
+        # Process Balance Sheet KPIs
+        if 'merged_df1' in st.session_state:
+            merged_df1 = st.session_state['merged_df1']
+            
+            # List of required terms for Balance Sheet
+            terms_bs = [
+                'Total assets', 
+                'Total Equity', 
+                'Total non-current liabilities', 
+                'Total current liabilities'
+                #'Cash and cash equivalents'
             ]
+            
+            kpis_bs = {
+                'Net Worth': pd.DataFrame(),
+                'Net Assets': pd.DataFrame()
+            }
+            
+            # Check if required data is available for Balance Sheet
+            for term in terms_bs:
+                if term not in merged_df1:
+                    st.warning(f"Data for {term} not found in the combined data.")
+                    return
+            
+            # Extract required data from Balance Sheet
+            total_assets = merged_df1['Total assets']
+            total_equity = merged_df1['Total Equity']
+            total_non_current_liabilities = merged_df1['Total non-current liabilities']
+            total_current_liabilities = merged_df1['Total current liabilities']
 
-            # Extract fiscal years
-            fy_columns = [col for col in data.columns if col.startswith('FY')]
-            fy_columns.sort(key=lambda x: int(x.split('FY ')[1].split('-')[0]))
+            companies = total_assets['Company'].unique() if peer_comparison_enabled else ['sonata-software']
 
-            # User selects the KPIs to display
-            selected_search_terms = st.multiselect("Select Search Terms", options=required_kpis, default=required_kpis, key='kpi_terms')
+            for company in companies:
+                if not peer_comparison_enabled and company != 'sonata-software':
+                    continue  # Skip other companies if peer comparison is disabled
 
-            if st.button('Show Results', key='kpi_show_results'):
-                results = aggregate_kpi_data(selected_search_terms, data, fy_columns)
-                st.session_state['kpi_results'] = results
-                st.session_state['kpi_fy_columns'] = fy_columns
-                st.rerun()
+                kpi_values_bs = {
+                    'Net Worth': [],
+                    'Net Assets': []
+                }
+                for col in total_assets.columns[1:]:
+                    # Calculate KPIs for each financial year
+                    total_assets_value = total_assets.loc[total_assets['Company'] == company, col].values[0] or 0
+                    total_equity_value = total_equity.loc[total_equity['Company'] == company, col].values[0] or 0
+                    total_non_current_liabilities_value = total_non_current_liabilities.loc[total_non_current_liabilities['Company'] == company, col].values[0] or 0
+                    total_current_liabilities_value = total_current_liabilities.loc[total_current_liabilities['Company'] == company, col].values[0] or 0
 
-            if st.session_state['kpi_results'] is not None and st.session_state['kpi_fy_columns'] is not None:
-                display_kpi_results(st.session_state['kpi_results'], st.session_state['kpi_fy_columns'])
+                    net_worth_value = total_equity_value
+                    net_assets_value = total_assets_value - total_non_current_liabilities_value - total_current_liabilities_value
 
+                    # Append values to KPI dictionaries
+                    kpi_values_bs['Net Worth'].append(net_worth_value)
+                    kpi_values_bs['Net Assets'].append(net_assets_value)
 
-def aggregate_kpi_data(search_terms, data, fy_columns):
-    aggregate_results = {term: pd.DataFrame() for term in search_terms}
+                # Store KPI values in DataFrames
+                for kpi in kpi_values_bs.keys():
+                    kpis_bs[kpi][company] = kpi_values_bs[kpi]
 
-    for term in search_terms:
-        term_data = data[data.iloc[:, 0].str.strip().str.lower() == term.lower()]  # Ensure to strip and lowercase any leading/trailing whitespace
-        if not term_data.empty:
-            # Filter columns to only include FY columns
-            term_data = term_data[['Unnamed: 0'] + fy_columns]
-            aggregate_results[term] = term_data
-    
-    return aggregate_results
+            # Display KPIs for Balance Sheet
+            for kpi_name, kpi_df in kpis_bs.items():
+                st.subheader(f"KPI (Balance Sheet): {kpi_name}")
+                kpi_df = pd.DataFrame(kpi_df).T  # Transpose to get financial years as columns
+                kpi_df.columns = total_assets.columns[1:]  # Set financial year names as columns
+                
+                kpi_df.insert(0, 'Company', companies if peer_comparison_enabled else ['sonata-software'])
 
+                kpi_df = kpi_df.reset_index(drop=True)
+                #st.dataframe(kpi_df)
 
-def forecast_and_plot_kpi(df, term, fy_columns):
-    valid_years = fy_columns
-    valid_values = [df[fy].values[0] for fy in fy_columns if fy in df.columns and pd.notna(df[fy].values[0])]
+                # Collect the DataFrame in the dictionary
+                kpi_data_dict[kpi_name] = kpi_df
 
-    if len(valid_values) > 1:
-        model = LinearRegression()
-        X = np.arange(1, len(valid_values) + 1).reshape(-1, 1)
-        y = np.array(valid_values).reshape(-1, 1)
-        model.fit(X, y)
+                # Plotting and Forecasting
+                cols = st.columns(1)
+                chart_type = 'line' if peer_comparison_enabled else 'area'
+                forecast_and_plot(kpi_df, kpi_name, kpi_df.columns[1:], cols[0], chart_type=chart_type)
 
-        forecasts = []
-        for i in range(1, 4):
-            next_year = len(valid_values) + i
-            forecast = model.predict(np.array([[next_year]]))[0][0]
-            forecasts.append(forecast)
-
-        forecast_values = np.append(valid_values, forecasts)
-        valid_years.extend(['Forecast1', 'Forecast2', 'Forecast3'])
-
-        colors = ['#7cb5ec'] * len(valid_values) + ['#e29375', '#e29375', '#e29375']
-
-        bar_chart_html = f"""
-        <script src="https://code.highcharts.com/highcharts.js"></script>
-        <script src="https://code.highcharts.com/modules/exporting.js"></script>
-        <script src="https://code.highcharts.com/modules/export-data.js"></script>
-        <script src="https://code.highcharts.com/modules/accessibility.js"></script>
-
-        <div id="container_{term.replace(' ', '_')}" style="width:100%; height:400px;"></div>
-        <script>
-        Highcharts.chart('container_{term.replace(' ', '_')}', {{
-            chart: {{
-                type: 'column'
-            }},
-            title: {{
-                text: '{term}'
-            }},
-            xAxis: {{
-                categories: {json.dumps(valid_years)},
-                crosshair: true
-            }},
-            yAxis: {{
-                min: 0,
-                title: {{
-                    text: 'Value'
-                }}
-            }},
-            tooltip: {{
-                headerFormat: '<span style="font-size:10px">{{point.key}}</span><table>',
-                pointFormat: '<tr><td style="color:{{series.color}};padding:0">{{series.name}}: </td>' +
-                    '<td style="padding:0"><b>{{point.y:.1f}}</b></td></tr>',
-                footerFormat: '</table>',
-                shared: true,
-                useHTML: true
-            }},
-            plotOptions: {{
-                column: {{
-                    pointPadding: 0.2,
-                    borderWidth: 0
-                }}
-            }},
-            series: [{{
-                name: '{term}',
-                data: {json.dumps(forecast_values.tolist())},
-                colorByPoint: true,
-                colors: {json.dumps(colors)}
-            }}]
-        }});
-        </script>
-        """
-        components.html(bar_chart_html, height=500)
-    else:
-        st.warning(f"Not enough data to forecast for {term}")
-
-
-
-def display_kpi_results(results, fy_columns):
-    for term, df in results.items():
-        # st.subheader(f"Data for {term}")
-        # st.write(df)  # Display the extracted data
-        
-        if not df.empty:
-            forecast_and_plot_kpi(df, term, fy_columns)
         else:
-            st.warning(f"Not enough data to forecast for {term}")
+            st.warning("Balance Sheet data not found. Please process the files in the Balance Sheet section.")
 
+        # Process Profit & Loss KPIs
+        if 'df_combined' in st.session_state:
+            df_combined = st.session_state['df_combined']
+            
+            # List of required terms for Profit & Loss
+            terms_pl = [
+                'Revenue from operations', 
+                'Finance costs', 
+                'Depreciation and amortization expense', 
+                'Profit before exceptional item and tax', 
+                'Basic (₹)', 
+                'Profit for the year',
+                'Net tax expense'
+            ]
+            
+            kpis_pl = {
+                'Net Sales': pd.DataFrame(),
+                'EBITDA': pd.DataFrame(),
+                'PAT': pd.DataFrame(),
+                'EPS': pd.DataFrame(),
+                'EBITDA Margin %': pd.DataFrame(),
+                'Net Profit Margin %': pd.DataFrame(),
+                'EBIT': pd.DataFrame()
+            }
+            
+            # Check if required data is available for Profit & Loss
+            for term in terms_pl:
+                if term not in df_combined:
+                    st.warning(f"Data for {term} not found in the combined data.")
+                    return
+            
+            # Extract required data from Profit & Loss
+            revenue = df_combined['Revenue from operations']
+            finance_costs = df_combined['Finance costs']
+            depreciation = df_combined['Depreciation and amortization expense']
+            profit_before_tax = df_combined['Profit before exceptional item and tax']
+            basic_eps = df_combined['Basic (₹)']
+            profit_for_period = df_combined['Profit for the year']
+            net_tax_expense = df_combined['Net tax expense']
 
+            companies = revenue['Company'].unique() if peer_comparison_enabled else ['sonata-software']
+
+            for company in companies:
+                if not peer_comparison_enabled and company != 'sonata-software':
+                    continue  # Skip other companies if peer comparison is disabled
+
+                kpi_values_pl = {
+                    'Net Sales': [],
+                    'EBITDA': [],
+                    'PAT': [],
+                    'EPS': [],
+                    'EBITDA Margin %': [],
+                    'Net Profit Margin %': [],
+                    'EBIT': []
+                }
+                for col in revenue.columns[1:]:
+                    # Calculate KPIs for each quarter
+                    net_sales_value = revenue.loc[revenue['Company'] == company, col].values[0]
+                    profit_before_tax_value = profit_before_tax.loc[profit_before_tax['Company'] == company, col].values[0]
+                    depreciation_value = depreciation.loc[depreciation['Company'] == company, col].values[0]
+                    finance_costs_value = finance_costs.loc[finance_costs['Company'] == company, col].values[0]
+                    pat_value = profit_for_period.loc[profit_for_period['Company'] == company, col].values[0]
+                    eps_value = basic_eps.loc[basic_eps['Company'] == company, col].values[0]
+                    net_tax_expense_value = net_tax_expense.loc[net_tax_expense['Company'] == company, col].values[0]
+
+                    ebitda_value = profit_before_tax_value + depreciation_value + finance_costs_value
+                    ebitda_margin_value = (ebitda_value / net_sales_value) * 100 if net_sales_value != 0 else 0
+                    net_profit_margin_value = (pat_value / net_sales_value) * 100 if net_sales_value != 0 else 0
+                    ebit_value = pat_value + net_tax_expense_value + finance_costs_value
+
+                    # Append values to KPI dictionaries
+                    kpi_values_pl['Net Sales'].append(net_sales_value)
+                    kpi_values_pl['EBITDA'].append(ebitda_value)
+                    kpi_values_pl['PAT'].append(pat_value)
+                    kpi_values_pl['EPS'].append(eps_value)
+                    kpi_values_pl['EBITDA Margin %'].append(ebitda_margin_value)
+                    kpi_values_pl['Net Profit Margin %'].append(net_profit_margin_value)
+                    kpi_values_pl['EBIT'].append(ebit_value)
+
+                # Store KPI values in DataFrames
+                for kpi in kpi_values_pl.keys():
+                    kpis_pl[kpi][company] = kpi_values_pl[kpi]
+
+            # Display KPIs for Profit & Loss
+            for kpi_name, kpi_df in kpis_pl.items():
+                st.subheader(f"KPI (Profit & Loss): {kpi_name}")
+                kpi_df = pd.DataFrame(kpi_df).T  # Transpose to get quarters as columns
+                kpi_df.columns = revenue.columns[1:]  # Set quarter names as columns
+                
+                # Insert the Company column correctly based on the number of rows in kpi_df
+                kpi_df.insert(0, 'Company', companies if peer_comparison_enabled else ['sonata-software'])
+
+                # Reset index to remove the index column
+                kpi_df = kpi_df.reset_index(drop=True)
+
+                # Display DataFrame
+                #st.dataframe(kpi_df)
+
+                # Collect the DataFrame in the dictionary
+                kpi_data_dict[kpi_name] = kpi_df
+
+                # Plotting and Forecasting
+                cols = st.columns(1)
+                chart_type = 'line' if peer_comparison_enabled else 'area'
+                forecast_and_plot(kpi_df, kpi_name, kpi_df.columns[1:], cols[0], chart_type=chart_type)
+
+        else:
+            st.warning("Profit & Loss data not found. Please process the files in the Profit and Loss section.")
+
+    
 
 # Load the selected page
 if page == "Balance Sheet":
