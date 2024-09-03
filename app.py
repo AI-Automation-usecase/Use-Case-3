@@ -10,6 +10,8 @@ import numpy as np
 import json
 import streamlit.components.v1 as components
 from io import BytesIO
+from xlsxwriter import Workbook
+
 
 
 # Set page configuration
@@ -157,7 +159,7 @@ def extract_data_from_pdf_bs(pdf_file, heading_map, conversion_factor, pdf_filen
                 data = extract_values(combined_text, heading_map, conversion_factor, pdf_filename)
                 return data, date_columns
  
-    st.write(f"Debug: No relevant data found in file: {pdf_filename}")
+    #st.write(f"Debug: No relevant data found in file: {pdf_filename}")
     return None, None
 
 
@@ -474,7 +476,7 @@ def forecast_and_plot(df, term, selected_items, col, add_legend=False, chart_typ
                 type: '{chart_type}'
             }},
             title: {{
-                text: 'Data for {term}'
+                text: 'Visualization of {term}'
             }},
             subtitle: {{
                 text: 'Amount in ₹<br>₹ in Crores',
@@ -521,9 +523,9 @@ def display_consolidated_balance_results(results, fys, chart_type):
 
     first_graph = True
     for term in terms:
-        st.subheader(f"Results for {term}")
+        #st.subheader(f"Results for {term}")
         df = results[term].reindex(columns=['Company'] + valid_fys)
-        st.dataframe(df)
+        #st.dataframe(df)
 
         # Plotting
         if not df.empty:
@@ -801,7 +803,7 @@ def balance_sheet_page():
                     st.session_state['merged_df1'][term] = merged_df1
                     
                     term_data_dict[term] = merged_df1
-                    st.dataframe(merged_df1)
+                    #st.dataframe(merged_df1)
                     # Plot the merged data
                     cols = st.columns(1)
                     forecast_and_plot(merged_df1, term, merged_df1.columns[1:], cols[0], add_legend=False, chart_type='line')
@@ -1071,6 +1073,7 @@ def profit_loss_page():
 
         if peer_comparison_enabled:
             if st.button('Show Results', key='show_results_peer'):
+                st.subheader("Peer Comparison")
                 # Use the pre-fetched and processed NSE data from session state
                 nse_data = st.session_state['nse_results_quarters']
 
@@ -1081,7 +1084,7 @@ def profit_loss_page():
                 sonata_data = aggregate_data_single_row_merged(selected_search_terms_quarters, st.session_state['pl_data_frames'], selected_quarters)
 
                 for term, df in formatted_data.items():
-                    st.subheader(f"Peer Comparison - Quarter-based: {term}")
+                    #st.subheader(f"Peer Comparison - Quarter-based: {term}")
                     
                     df = df.reset_index()
                     df = convert_lakhs_to_crores(df)
@@ -1101,13 +1104,13 @@ def profit_loss_page():
                     st.session_state['df_combined'][term] = df_combined
 
                     # Display the combined DataFrame
-                    st.dataframe(df_combined)
+                    #st.dataframe(df_combined)
                     
                     # Collect the DataFrame in the dictionary
                     term_data_dict[term] = df_combined
 
                     # Forecast and plot if peer comparison is enabled
-                    st.subheader(f"Forecast for {term}")
+                    #st.subheader(f"Forecast for {term}")
                     cols = st.columns(1)
                     forecast_and_plot(df_combined, term, df_combined.columns[1:], cols[0], add_legend=False, chart_type='line')
                     st.markdown("**Note:** Data indicating zero may imply that the data is not present or not extracted due to improper headings.")
@@ -1180,9 +1183,9 @@ def display_consolidated_pl_results_quarters(results, quarters, chart_type):
 
     first_graph = True
     for term in terms:
-        st.subheader(f"Results for {term}")
+        #st.subheader(f"Results for {term}")
         df = results[term].reindex(columns=['Company'] + valid_quarters)
-        st.dataframe(df)
+        #st.dataframe(df)
 
         # Plotting
         if not df.empty:
@@ -1276,7 +1279,7 @@ def kpi_page():
                 cols = st.columns(1)
                 chart_type = 'line' if peer_comparison_enabled else 'area'
                 forecast_and_plot(kpi_df, kpi_name, kpi_df.columns[1:], cols[0], chart_type=chart_type)
-
+                st.markdown("**Note:** Data indicating zero may imply that the data is not present or not extracted due to improper headings.")
         else:
             st.warning("Balance Sheet data not found. Please process the files in the Balance Sheet section.")
 
@@ -1385,7 +1388,7 @@ def kpi_page():
                 cols = st.columns(1)
                 chart_type = 'line' if peer_comparison_enabled else 'area'
                 forecast_and_plot(kpi_df, kpi_name, kpi_df.columns[1:], cols[0], chart_type=chart_type)
-
+                st.markdown("**Note:** Data indicating zero may imply that the data is not present or not extracted due to improper headings.")
         else:
             st.warning("Profit & Loss data not found. Please process the files in the Profit and Loss section.")
 
