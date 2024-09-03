@@ -1,8 +1,9 @@
-streamlit 
-pandas
-requests
-PyMuPDF
-numpy
-fitz
-xlsxwriter
-openpyxl
+streamlit==1.35.0
+pandas==2.2.2
+requests==2.32.3
+PyMuPDF==1.21.1
+numpy==1.23.4
+openpyxl==3.1.2
+XlsxWriter==3.0.3
+protobuf==5.27.3
+pytest==7.2.1
