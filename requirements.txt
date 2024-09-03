@@ -5,3 +5,4 @@ PyMuPDF
 numpy
 fitz
 xlsxwriter
+openpyxl
