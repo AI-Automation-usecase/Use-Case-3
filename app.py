@@ -10,7 +10,7 @@ import numpy as np
 import json
 import streamlit.components.v1 as components
 from io import BytesIO
-from xlsxwriter import Workbook
+from collections.abc import Sequence
 
 
 
