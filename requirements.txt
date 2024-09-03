@@ -4,3 +4,4 @@ requests
 PyMuPDF
 numpy
 fitz
+xlsxwriter
