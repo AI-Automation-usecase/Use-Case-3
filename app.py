@@ -15,6 +15,7 @@ from pptx import Presentation
 from pptx.util import Inches, Pt  # Make sure Pt is imported
 from pptx.enum.text import PP_ALIGN
 import matplotlib.pyplot as plt
+from collections.abc import Sequence
 
 
 # Set page configuration
@@ -614,7 +615,7 @@ def initialize_download_and_process():
             }
 
             # Create an Excel writer to save processed data
-            with pd.ExcelWriter(output_excel_file_path, engine='xlsxwriter') as writer:
+            with pd.ExcelWriter(output_excel_file_path) as writer:
                 for company, unit in companies.items():
                     conversion_factor = conversion_factors[unit]
                     company_name, all_files = download_files_once(company)
