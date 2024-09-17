@@ -18,6 +18,8 @@ import matplotlib.pyplot as plt
 from collections.abc import Sequence
 import time
 from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 # Set page configuration
@@ -204,8 +206,7 @@ def extract_date_columns(text):
                 continue
     return date_list
 
-# Function to download files from the website with retry mechanism
-def download_files(company_symbol, max_retries=3, retry_delay=5):
+def download_files(company_symbol):
     url = f"https://www.nseindia.com/api/corp-info?symbol={company_symbol}&corpType=annualreport&market=cm"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
@@ -214,77 +215,51 @@ def download_files(company_symbol, max_retries=3, retry_delay=5):
         "X-Requested-With": "XMLHttpRequest",
         "Connection": "keep-alive"
     }
-
+ 
+    # Setting up session with retries and backoff
     session = requests.Session()
+    retry = Retry(connect=5, backoff_factor=0.5, status_forcelist=[502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
     session.headers.update(headers)
-
+ 
     init_url = f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}"
-    session.get(init_url)
-
-    response = session.get(url)
-
+    session.get(init_url, timeout=10)
+ 
+    response = session.get(url, timeout=10)
+ 
     if response.status_code == 200:
         data = response.json()
         if data:
             company_name_key = 'companyName' if 'companyName' in data[0] else 'company_name'
             company_name = data[0][company_name_key].replace(" ", "_")
             os.makedirs(company_name, exist_ok=True)
-
+ 
             file_names = [item['fileName'].split("/")[-1] for item in data[:4]]
             df_files = pd.DataFrame(file_names, columns=['FileName'])
             df_files['Exists'] = df_files['FileName'].apply(lambda x: os.path.isfile(os.path.join(company_name, x)))
-
+ 
             files_to_download = df_files[df_files['Exists'] == False]['FileName'].tolist()
-
+ 
             with st.spinner("Downloading files..."):
                 for file_name in files_to_download:
                     file_url = next(item['fileName'] for item in data if item['fileName'].endswith(file_name))
                     file_extension = file_name.split('.')[-1].lower()
-
-                    retries = 0
-                    while retries < max_retries:
+ 
+                    if file_extension in ['zip', 'pdf']:
                         try:
-                            file_response = session.get(file_url, stream=True)
-                            if file_response.status_code == 200:
-                                file_size = int(file_response.headers.get('Content-Length', 0))
-                                downloaded_size = 0
-
+                            with session.get(file_url, stream=True, timeout=30) as file_response:
+                                file_response.raise_for_status()
                                 file_path = os.path.join(company_name, file_name)
                                 with open(file_path, 'wb') as file:
-                                    for chunk in file_response.iter_content(1024 * 1024):  # 1MB chunks
-                                        if chunk:
+                                    for chunk in file_response.iter_content(chunk_size=8192):
+                                        if chunk:  # Filter out keep-alive chunks
                                             file.write(chunk)
-                                            downloaded_size += len(chunk)
-
-                                # Check if the entire file has been downloaded
-                                if downloaded_size < file_size:
-                                    raise ChunkedEncodingError("Incomplete file download")
-
-                                break  # If the download is successful, break the retry loop
-                            else:
-                                retries += 1
-                                st.warning(f"Error {file_response.status_code}. Retrying {retries}/{max_retries}...")
-                                time.sleep(retry_delay)
-                        except (ChunkedEncodingError, ConnectionError, Timeout) as e:
-                            retries += 1
-                            st.warning(f"Error {e}. Retrying {retries}/{max_retries}...")
-                            time.sleep(retry_delay)
-
-                    if retries == max_retries:
-                        st.error(f"Failed to download {file_name} after {max_retries} attempts.")
-                        return None, []
-
-                    # **Check if the file is a ZIP file before trying to open it**
-                    if file_extension == 'zip':
-                        try:
-                            with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                                zip_ref.extractall(company_name)  # Extract ZIP contents
-                        except zipfile.BadZipFile:
-                            st.error(f"{file_name} is not a valid ZIP file or is corrupted.")
-                            continue
-
+                        except requests.exceptions.RequestException as e:
+                            st.error(f"Error downloading {file_name}: {str(e)}")
+ 
             return company_name, df_files['FileName'].tolist()
-
+ 
     return None, []
 # Function to load and process the data from the Excel file
 def load_and_process_data(excel_file_path):
