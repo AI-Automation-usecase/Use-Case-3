@@ -9,3 +9,4 @@ protobuf==4.24.3
 pytest==7.2.1
 matplotlib==3.9.2
 python_pptx==0.6.23
+urllib3==1.26.19
