@@ -615,7 +615,7 @@ def initialize_download_and_process():
             }
 
             # Create an Excel writer to save processed data
-            with pd.ExcelWriter(output_excel_file_path) as writer:
+            with pd.ExcelWriter(output_excel_file_path, engine='xlsxwriter') as writer:
                 for company, unit in companies.items():
                     conversion_factor = conversion_factors[unit]
                     company_name, all_files = download_files_once(company)
