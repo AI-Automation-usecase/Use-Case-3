@@ -16,6 +16,8 @@ from pptx.util import Inches, Pt  # Make sure Pt is imported
 from pptx.enum.text import PP_ALIGN
 import matplotlib.pyplot as plt
 from collections.abc import Sequence
+import time
+from requests.exceptions import ChunkedEncodingError
 
 
 # Set page configuration
@@ -202,8 +204,8 @@ def extract_date_columns(text):
                 continue
     return date_list
 
-# Function to download files from the website
-def download_files(company_symbol):
+# Function to download files from the website with retry mechanism
+def download_files(company_symbol, max_retries=3, retry_delay=5):
     url = f"https://www.nseindia.com/api/corp-info?symbol={company_symbol}&corpType=annualreport&market=cm"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
@@ -212,43 +214,57 @@ def download_files(company_symbol):
         "X-Requested-With": "XMLHttpRequest",
         "Connection": "keep-alive"
     }
-
+ 
     session = requests.Session()
     session.headers.update(headers)
-
+ 
     init_url = f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}"
     session.get(init_url)
-
+ 
     response = session.get(url)
-
+ 
     if response.status_code == 200:
         data = response.json()
         if data:
             company_name_key = 'companyName' if 'companyName' in data[0] else 'company_name'
             company_name = data[0][company_name_key].replace(" ", "_")
             os.makedirs(company_name, exist_ok=True)
-
+ 
             file_names = [item['fileName'].split("/")[-1] for item in data[:4]]
             df_files = pd.DataFrame(file_names, columns=['FileName'])
             df_files['Exists'] = df_files['FileName'].apply(lambda x: os.path.isfile(os.path.join(company_name, x)))
-
+ 
             files_to_download = df_files[df_files['Exists'] == False]['FileName'].tolist()
-
+ 
             with st.spinner("Downloading files..."):
                 for file_name in files_to_download:
                     file_url = next(item['fileName'] for item in data if item['fileName'].endswith(file_name))
                     file_extension = file_name.split('.')[-1].lower()
-
-                    if file_extension in ['zip', 'pdf']:
-                        file_response = session.get(file_url)
-
-                        if file_response.status_code == 200:
-                            file_path = os.path.join(company_name, file_name)
-                            with open(file_path, 'wb') as file:
-                                file.write(file_response.content)
-
+ 
+                    retries = 0
+                    while retries < max_retries:
+                        try:
+                            file_response = session.get(file_url, stream=True)
+                            if file_response.status_code == 200:
+                                file_path = os.path.join(company_name, file_name)
+                                with open(file_path, 'wb') as file:
+                                    for chunk in file_response.iter_content(1024):
+                                        file.write(chunk)
+                                break  # If the download is successful, break the retry loop
+                            else:
+                                retries += 1
+                                time.sleep(retry_delay)  # Wait before retrying
+                        except ChunkedEncodingError:
+                            retries += 1
+                            st.warning(f"ChunkedEncodingError occurred. Retrying {retries}/{max_retries}...")
+                            time.sleep(retry_delay)
+ 
+                    if retries == max_retries:
+                        st.error(f"Failed to download {file_name} after {max_retries} attempts.")
+                        return None, []
+ 
             return company_name, df_files['FileName'].tolist()
-
+ 
     return None, []
 # Function to load and process the data from the Excel file
 def load_and_process_data(excel_file_path):
