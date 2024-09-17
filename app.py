@@ -10,8 +10,11 @@ import numpy as np
 import json
 import streamlit.components.v1 as components
 from io import BytesIO
-from collections.abc import Sequence
-
+from xlsxwriter import Workbook
+from pptx import Presentation
+from pptx.util import Inches, Pt  # Make sure Pt is imported
+from pptx.enum.text import PP_ALIGN
+import matplotlib.pyplot as plt
 
 
 # Set page configuration
@@ -61,8 +64,8 @@ page = st.sidebar.radio("Select Sheets", ["Balance Sheet", "Profit & Loss", "KPI
 if 'uploaded_files' not in st.session_state:
     st.session_state['uploaded_files'] = []
 
-if 'balance_files_processed' not in st.session_state:
-    st.session_state['balance_files_processed'] = False
+# if 'balance_files_processed' not in st.session_state:
+#     st.session_state['balance_files_processed'] = False
 if 'balance_data_frames' not in st.session_state:
     st.session_state['balance_data_frames'] = []
 if 'balance_results' not in st.session_state:
@@ -71,6 +74,11 @@ if 'balance_fy_range' not in st.session_state:
     st.session_state['balance_fy_range'] = None
 if 'balance_terms' not in st.session_state:
     st.session_state['balance_terms'] = []
+
+# if 'balance_results_shown' not in st.session_state:
+#     st.session_state['balance_results_shown'] = False
+# if 'merged_df1' not in st.session_state:
+#     st.session_state['merged_df1'] = {}
 
 if 'include_forecast_bs' not in st.session_state:
     st.session_state['include_forecast_bs'] = False
@@ -277,24 +285,23 @@ def extract_values(text, heading_map, conversion_factor, pdf_filename):
                             numeric_values = []
 
                             for v in value_lines:
-                                # Replace \xa0 with a regular space and remove commas and spaces
+                                # Leave missing values as they are (None or empty)
                                 v_clean = v.replace('\xa0', '').replace(',', '').strip()
 
-                                # Check if the value is numeric or has a pattern like '5 (iii)', '8(c)', or similar
+                                # Check if the value is numeric
                                 if re.match(r'^-?\d+(\.\d+)?(\s*\([ivx]+\))?$', v_clean, re.IGNORECASE) or re.match(r'^\d+(\.\d+)?$', v_clean):
                                     numeric_values.append(float(re.sub(r'\s*\([ivx]+\)', '', v_clean)))
 
-                            # If we have at least two numeric values, use them
                             if len(numeric_values) >= 2:
                                 value1 = numeric_values[-2] * conversion_factor
                                 value2 = numeric_values[-1] * conversion_factor
                             else:
-                                value1, value2 = None, None
+                                value1, value2 = None, None  # Keep None for missing data
 
                             data.append([key, value1, value2])
-                        except IndexError as e:
-                            data.append([key, None, None])
-                        except TypeError as e:
+                        except IndexError:
+                            data.append([key, None, None])  # Keep None for missing data
+                        except TypeError:
                             data.append([key, None, None])
                         break
         return data
@@ -329,13 +336,15 @@ def calculate_financial_year(date_str):
         return None
 
 # Function to display data for each heading across all companies based on FY values
+
+
 def display_data_for_heading(processed_data, heading, fy_columns):
     all_data = []
     columns = ['Company'] + fy_columns
 
     for company, data in processed_data.items():
         if heading in data.index:
-            row = [company] + [data.at[heading, fy] if fy in data.columns else None for fy in fy_columns]
+            row = [company] + [data.at[heading, fy] if fy in data.columns else None for fy in fy_columns]  # Keep None for missing values
         else:
             row = [company] + [None] * len(fy_columns)
         all_data.append(row)
@@ -347,6 +356,7 @@ def display_data_for_heading(processed_data, heading, fy_columns):
     result_df = result_df[sorted_columns]
     
     return result_df
+
 
 def convert_lakhs_to_crores_value(value):
     if isinstance(value, (int, float)):
@@ -417,9 +427,9 @@ def process_dataframe(df, term, file_name):
     matching_rows = normalized_df[normalized_df.apply(lambda row: term_lower in row.values, axis=1)]
     if not matching_rows.empty:
         matching_rows.insert(0, 'File', file_name)
-        matching_rows = replace_missing_values(matching_rows)
-        return matching_rows
+        return matching_rows  # Do not replace missing values with 0
     return pd.DataFrame()
+
 
 
 
@@ -435,6 +445,23 @@ def forecast_and_plot(df, term, selected_items, col, add_legend=False, chart_typ
     company_names = df['Company'].unique()
     all_series = []
 
+    # Define constant colors for each company
+    company_colors = {
+        'sonata-software': '#1f77b4',   # Blue
+        'TCS': '#ff7f0e',               # Orange
+        'INFY': '#2ca02c',              # Green
+        'HCLTECH': '#d62728',           # Red
+        'LTIM': '#9467bd',              # Purple
+        'WIPRO': '#8c564b',             # Brown
+        'COFORGE': '#e377c2',           # Pink
+        'PERSISTENT': '#7f7f7f',        # Gray
+        'MPHASIS': '#bcbd22',           # Olive
+        'ZENSARTECH': '#17becf'         # Cyan
+    }
+
+    # Terms for which the subtitle should not be displayed
+    no_subtitle_terms = ["Basic (₹)", "EPS", "EBITDA Margin %", "Net Profit Margin %"]
+
     for company in company_names:
         company_data = df[df['Company'] == company]
 
@@ -444,10 +471,6 @@ def forecast_and_plot(df, term, selected_items, col, add_legend=False, chart_typ
         filtered_values = np.array(filtered_values).astype(np.float64)
         filtered_items = list(selected_items[:len(filtered_values)])
 
-        # Debug statements to check data
-        #st.write(f"Debug: filtered_items for {company} = {filtered_items}")
-        #st.write(f"Debug: filtered_values for {company} = {filtered_values}")
-
         if len(filtered_values) > 0:
             series_data = {
                 'name': company,
@@ -456,7 +479,8 @@ def forecast_and_plot(df, term, selected_items, col, add_legend=False, chart_typ
                 'dataLabels': {  # Enable data labels
                     'enabled': True,
                     'format': '{point.y:.2f}'  # Format to show two decimal places
-                }
+                },
+                'color': company_colors.get(company, '#000000')  # Assign color based on company, default to black
             }
             all_series.append(series_data)
 
@@ -464,6 +488,12 @@ def forecast_and_plot(df, term, selected_items, col, add_legend=False, chart_typ
     if not all_series:
         st.warning(f"No data available to plot for {term}.")
         return
+
+    # Conditional subtitle based on the term
+    if term in no_subtitle_terms:
+        subtitle_text = ""
+    else:
+        subtitle_text = "Amount in ₹<br>₹ in Crores"
 
     highchart_html = f"""
     <script src="https://code.highcharts.com/highcharts.js"></script>
@@ -479,7 +509,7 @@ def forecast_and_plot(df, term, selected_items, col, add_legend=False, chart_typ
                 text: 'Visualization of {term}'
             }},
             subtitle: {{
-                text: 'Amount in ₹<br>₹ in Crores',
+                text: '{subtitle_text}',
                 align: 'right',
                 verticalAlign: 'top',
                 style: {{
@@ -525,13 +555,14 @@ def display_consolidated_balance_results(results, fys, chart_type):
     for term in terms:
         #st.subheader(f"Results for {term}")
         df = results[term].reindex(columns=['Company'] + valid_fys)
-        #st.dataframe(df)
+        st.dataframe(df)
 
         # Plotting
         if not df.empty:
             cols = st.columns(1)
             forecast_and_plot(df, term, valid_fys, cols[0], add_legend=first_graph, chart_type=chart_type)
             first_graph = False
+
 
 def aggregate_data_single_row_merged(search_terms, data_frames_info, selected_fys):
     company_name = "sonata-software"
@@ -547,12 +578,13 @@ def aggregate_data_single_row_merged(search_terms, data_frames_info, selected_fy
                     processed_df = process_dataframe(df, term, file_name)
                     if fy in processed_df.columns and not processed_df.empty:
                         value = processed_df[fy].iloc[0] if pd.notna(processed_df[fy].iloc[0]) else 0
+                        if term == 'Basic (₹)':  # Apply multiplication for Sonata Software data
+                            value *= 100  # Multiply by 100
                         values.append(value)
             row_data[fy] = values[0] if values else 0
         aggregate_results[term] = pd.DataFrame([row_data])
 
     return aggregate_results
-
 
 
 # Ensure you only download and process files once
@@ -582,7 +614,7 @@ def initialize_download_and_process():
             }
 
             # Create an Excel writer to save processed data
-            with pd.ExcelWriter(output_excel_file_path) as writer:
+            with pd.ExcelWriter(output_excel_file_path, engine='xlsxwriter') as writer:
                 for company, unit in companies.items():
                     conversion_factor = conversion_factors[unit]
                     company_name, all_files = download_files_once(company)
@@ -664,10 +696,10 @@ initialize_download_and_process()
 
 # Function for Balance Sheet Page
 def filter_none_rows(df):
-    # Keep only rows where at least one of the financial year columns is not None
     fy_columns = [col for col in df.columns if col.startswith('FY')]
-    df_filtered = df.dropna(subset=fy_columns, how='all')
+    df_filtered = df.dropna(subset=fy_columns, how='all')  # Remove rows where all FY columns are None
     return df_filtered
+
 
 def sort_fy_columns(fy_columns):
     # Filter out any columns that do not match the FY format
@@ -683,10 +715,150 @@ def sort_fy_columns(fy_columns):
     return [fy_columns_filtered[i] for i in sorted_indices]
 
 
+# Function to generate a graph using matplotlib (only for PowerPoint)
+def save_matplotlib_graph(df, term):
+    # Define constant colors for each company (same as used in Highcharts)
+    company_colors = {
+        'sonata-software': '#1f77b4',   # Blue
+        'TCS': '#ff7f0e',               # Orange
+        'INFY': '#2ca02c',              # Green
+        'HCLTECH': '#d62728',           # Red
+        'LTIM': '#9467bd',              # Purple
+        'WIPRO': '#8c564b',             # Brown
+        'COFORGE': '#e377c2',           # Pink
+        'PERSISTENT': '#7f7f7f',        # Gray
+        'MPHASIS': '#bcbd22',           # Olive
+        'ZENSARTECH': '#17becf'         # Cyan
+    }
+
+    # Terms that should not have the subtitle
+    exclude_terms = ["Basic (₹)", "EPS", "EBITDA Margin %", "Net Profit Margin %"]
+
+    fig, ax = plt.subplots(figsize=(12, 6))  # Increase the figure size to give more room
+
+    # Plot data with constant colors for each company
+    for company in df['Company'].unique():
+        company_data = df[df['Company'] == company].set_index('Company').T
+        ax.plot(company_data.index, company_data.values, label=company, 
+                marker='o', color=company_colors.get(company, '#000000'))  # Default to black if company is not found
+
+    # Set the title, x-axis, and y-axis labels
+    ax.set_title(term, fontsize=16)
+    ax.set_ylabel('Value', fontsize=12)
+    ax.set_xlabel('Fiscal Year / Quarter', fontsize=12)
+
+    # Add subtitle in the top-right corner, only for specific terms
+    if term not in exclude_terms:
+        subtitle_text = "Amount in ₹\n₹ in Crores"
+        # Position subtitle on the top-right corner of the plot
+        ax.text(1, 1.02, subtitle_text, transform=ax.transAxes, ha='right', fontsize=10, color='gray')
+
+    # Rotate the x-axis labels for better readability
+    plt.xticks(rotation=45, fontsize=10)
+
+    # Move the legend to the bottom, increase number of columns, and reduce font size
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=6, fontsize=8, frameon=False)
+
+    # Adjust layout to fit the legend at the bottom
+    plt.tight_layout(rect=[0, 0, 1, 1])
+
+    # Save the graph as an image to use in PowerPoint
+    image_stream = BytesIO()
+    fig.savefig(image_stream, format='png')
+    image_stream.seek(0)
+
+    return image_stream
+
+
+# Function to generate and return PowerPoint presentation
+def generate_ppt(term_data_dict, title):
+    prs = Presentation()
+
+    for term, df in term_data_dict.items():
+        # Remove duplicates from the dataframe
+        df = df.drop_duplicates(subset='Company', keep='first')
+
+        # Filter out rows that are entirely NaN or empty
+        df = df.dropna(how='all')
+
+        # Recalculate rows and columns after removing duplicates and empty rows
+        rows, cols = df.shape
+
+        # Add slide for table
+        slide_layout = prs.slide_layouts[5]
+        slide = prs.slides.add_slide(slide_layout)
+
+        # Add title to slide
+        title_shape = slide.shapes.title
+        title_shape.text = f"{term}"
+
+        # Add table to slide (using dynamic row count based on filtered DataFrame)
+        table = slide.shapes.add_table(rows + 1, cols, Inches(0.5), Inches(1.5), Inches(9), Inches(4)).table
+
+        # Set column names in the first row
+        for i, col_name in enumerate(df.columns):
+            if i < cols:  # Ensure we're within column bounds
+                table.cell(0, i).text = col_name
+                # Decrease the font size of the header
+                for paragraph in table.cell(0, i).text_frame.paragraphs:
+                    paragraph.font.size = Pt(10)  # Set font size for column headers
+
+        # Set data in the table (formatted to 3 decimal places)
+        current_row = 1  # Start at the first data row
+        for i, row in df.iterrows():
+            # Check if the entire row is empty (all values are NaN)
+            if row.isnull().all():
+                continue  # Skip this row if it's entirely empty
+
+            # Add only non-empty rows to the table
+            for j, value in enumerate(row):
+                if j < cols:  # Ensure we're within column bounds
+                    if isinstance(value, (int, float)):
+                        table.cell(current_row, j).text = f"{value:.3f}"  # Limit to 3 decimal places
+                    else:
+                        table.cell(current_row, j).text = str(value)
+
+                    # Decrease the font size of the data
+                    for paragraph in table.cell(current_row, j).text_frame.paragraphs:
+                        paragraph.font.size = Pt(9)  # Set font size for data
+
+            # Move to the next row in the table for non-empty data
+            current_row += 1
+
+        # Add slide for graph
+        slide = prs.slides.add_slide(prs.slide_layouts[5])
+
+        # Generate and save graph image
+        image_stream = save_matplotlib_graph(df, term)
+
+        # Insert the saved graph image into the slide
+        slide.shapes.add_picture(image_stream, Inches(1), Inches(2), Inches(8), Inches(5.5))
+
+    # Save presentation to a BytesIO object
+    ppt_io = BytesIO()
+    prs.save(ppt_io)
+    ppt_io.seek(0)
+
+    return ppt_io
+
+
+# Updated balance_sheet_page function
+
 
 
 def balance_sheet_page():
     term_data_dict = {}
+
+    st.subheader("Balance Sheet")
+
+    # Track peer comparison state globally if not already set
+    if 'peer_comparison_enabled' not in st.session_state:
+        st.session_state['peer_comparison_enabled'] = False
+
+    peer_comparison_enabled = st.checkbox("Peer Comparison", value=st.session_state['peer_comparison_enabled'])
+    st.session_state['peer_comparison_enabled'] = peer_comparison_enabled
+
+    # Handle file uploads
     uploaded_files = st.sidebar.file_uploader("Choose Excel files for BS & PL", type='xlsx', accept_multiple_files=True, key='balance_files')
 
     if uploaded_files:
@@ -710,7 +882,7 @@ def balance_sheet_page():
                 if col2.button("X", key=f"remove_balance_{i}"):
                     st.session_state['uploaded_files'].pop(i)
                     st.session_state['balance_files_processed'] = False  # Mark as not processed
-                    st.rerun()
+                    st.rerun()  # Refresh the page automatically
 
     # Automatically process files when they are uploaded or deleted
     if not st.session_state.get('balance_files_processed') and st.session_state['uploaded_files']:
@@ -718,7 +890,7 @@ def balance_sheet_page():
             data_frames_info = []
             for file in st.session_state['uploaded_files']:
                 try:
-                    df_info = read_file(file, 'BS_Y')
+                    df_info = read_file(file, 'BS_Y')  # Assuming read_file is a custom function you defined
                     if df_info[0] is None:
                         st.error(f"The file {file.name} does not contain the required sheet 'BS_Y'. Please upload a file with the correct sheet name.")
                         return
@@ -729,8 +901,9 @@ def balance_sheet_page():
 
             st.session_state['balance_data_frames'] = data_frames_info
             st.session_state['balance_files_processed'] = True
-            st.rerun()
+            st.rerun()  # Refresh the page automatically
 
+    # Check if data is processed correctly
     if st.session_state.get('balance_files_processed'):
         fys = set()
         for df_info in st.session_state['balance_data_frames']:
@@ -741,9 +914,6 @@ def balance_sheet_page():
         if fys and st.session_state['balance_fy_range'] is None:
             st.session_state['balance_fy_range'] = (fys[0], fys[-1])
 
-        col1, col2 = st.columns(2)
-        peer_comparison_enabled = st.checkbox("Peer Comparison")
-
         selected_fys = []
         if peer_comparison_enabled:
             selected_fys = fys
@@ -752,25 +922,50 @@ def balance_sheet_page():
             if selected_fy_range:
                 selected_fys = generate_full_range(fys, selected_fy_range[0], selected_fy_range[1])
 
-        search_terms = ["Total non-current assets", "Total current assets", "Total assets", "Total Equity", "Total non-current liabilities", "Total current liabilities", "Total equity and liabilities"]
+        search_terms = [
+            "Total non-current assets", "Total current assets", "Total assets", 
+            "Total Equity", "Total non-current liabilities", "Total current liabilities", 
+            "Total equity and liabilities"
+        ]
         selected_search_terms = st.multiselect("Select Search Terms", options=search_terms, default=search_terms, key='balance_terms')
 
-        if st.button('Show Results', key='balance_show_results'):
+        # Only show the company selection when peer comparison is enabled
+        if peer_comparison_enabled:
+            companies = ['sonata-software', 'TCS', 'INFY', 'HCLTECH', 'LTIM', 'WIPRO', 'COFORGE', 'MPHASIS', 'ZENSARTECH']
+            selected_companies = st.multiselect("Select Companies for Comparison", options=companies, default=companies, key='selected_companies')
+
+        # Track if "Show BS Results" button is clicked or if results have already been generated
+        if 'balance_show_results_clicked' not in st.session_state:
+            st.session_state['balance_show_results_clicked'] = False
+
+        # If the button is clicked, update the flag
+        if st.button('Show BS Results', key='balance_show_results') or st.session_state['balance_show_results_clicked']:
+            st.session_state['balance_show_results_clicked'] = True  # Store the result in session state
+
+            # Process and display results
             results = aggregate_data_single_row_merged(selected_search_terms, st.session_state['balance_data_frames'], selected_fys)
             st.session_state['balance_results'] = results
             st.session_state['sorted_balance_fys'] = selected_fys
 
+        display_results = st.session_state['balance_show_results_clicked']
+
+        # Show the results if the button has been clicked or state indicates to show results
+        if display_results:
             if peer_comparison_enabled:
-                st.subheader("Peer Comparison")
+                #st.subheader("Peer Comparison")
                 for term in selected_search_terms:
-                    # Extract peer data and sonata data for the term
+                    # Extract peer data and Sonata data for the term
                     peer_data_df = display_data_for_heading(st.session_state['processed_data'], term, st.session_state['fy_columns'])
-                    peer_data_df = peer_data_df.fillna(0)  # Replace NaN values with zero
                     sonata_data_df = st.session_state['balance_results'][term]
+
+                    # Filter the peer data to only show selected companies
+                    peer_data_df = peer_data_df[peer_data_df['Company'].isin(selected_companies)]
 
                     # Extract ZENSARTECH data from peer_data_df
                     zensartech_data = peer_data_df[peer_data_df['Company'] == 'ZENSARTECH']
-                    if not zensartech_data.empty:
+
+                    # Check if ZENSARTECH is already in sonata_data_df to prevent duplication
+                    if not zensartech_data.empty and 'ZENSARTECH' not in sonata_data_df['Company'].values:
                         # Add ZENSARTECH data to sonata_data_df
                         sonata_data_df = pd.concat([sonata_data_df, zensartech_data])
 
@@ -788,6 +983,9 @@ def balance_sheet_page():
                     # Merge the data
                     merged_df1 = pd.concat([sonata_data_df, peer_data_df], ignore_index=True)
 
+                    # Drop duplicates to ensure ZENSARTECH or any other company doesn't appear twice
+                    merged_df1 = merged_df1.drop_duplicates(subset='Company', keep='first')
+
                     if "ZENSARTECH" in merged_df1['Company'].values:
                         zensartech_data = merged_df1[merged_df1['Company'] == "ZENSARTECH"]
                         for fy in ['FY 19-20', 'FY 20-21']:
@@ -801,18 +999,28 @@ def balance_sheet_page():
                     merged_df1 = filter_none_rows(merged_df1)
 
                     st.session_state['merged_df1'][term] = merged_df1
-                    
                     term_data_dict[term] = merged_df1
-                    #st.dataframe(merged_df1)
+                    st.dataframe(merged_df1)
+
                     # Plot the merged data
                     cols = st.columns(1)
                     forecast_and_plot(merged_df1, term, merged_df1.columns[1:], cols[0], add_legend=False, chart_type='line')
                     st.markdown("**Note:** Data indicating zero may imply that the data is not present or not extracted due to improper headings.")
-                
+
             else:
                 display_consolidated_balance_results(st.session_state['balance_results'], st.session_state['sorted_balance_fys'], chart_type='area')
 
-            
+            if peer_comparison_enabled and term_data_dict:
+                ppt_io = generate_ppt(term_data_dict, "BL Presentation")
+                st.download_button(
+                    label="Download BL PowerPoint",
+                    data=ppt_io,
+                    file_name="balance_sheet_visualization.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                )
+
+
+
 
 def calculate_quarter(date):
     month = date.month
@@ -974,9 +1182,12 @@ def pivot_data_to_format(results_quarters, selected_search_terms_quarters):
     
     return formatted_data
 
+
+
 def profit_loss_page():
     # Centralize file upload handling and data processing
     term_data_dict = {}  # Dictionary to hold data for each term
+    st.subheader("Profit & Loss")
 
     uploaded_files = st.sidebar.file_uploader("Choose Excel files for BS & PL", type='xlsx', accept_multiple_files=True, key='pl_files')
 
@@ -1022,7 +1233,11 @@ def profit_loss_page():
                 st.session_state['pl_files_processed'] = True
                 st.rerun()
 
+    # Check if data is processed correctly
     if st.session_state.get('pl_files_processed'):
+        # Debugging: Print the processed data to check if it's correct
+        #st.write("Processed PL Data Frames:", st.session_state['pl_data_frames'])
+
         # Fetch and store NSE data if not already done
         if 'nse_data_processed' not in st.session_state:
             with st.spinner("Fetching NSE data..."):
@@ -1039,6 +1254,11 @@ def profit_loss_page():
             st.session_state['pl_fy_range'] = (quarters[0], quarters[-1])
 
         peer_comparison_enabled = st.checkbox("Peer Comparison")
+
+        # Only show the company selection when peer comparison is enabled
+        if peer_comparison_enabled:
+            companies = ['TCS', 'INFY', 'HCLTECH', 'LTIM', 'WIPRO', 'COFORGE', 'PERSISTENT', 'MPHASIS', 'ZENSARTECH']
+            selected_companies = st.multiselect("Select Companies for Comparison", options=companies, default=companies, key='selected_companies_pl')
 
         # Only display the quarter range slider when peer comparison is disabled
         selected_quarters = []
@@ -1071,8 +1291,17 @@ def profit_loss_page():
         if 'df_combined' not in st.session_state:
             st.session_state['df_combined'] = {}
 
-        if peer_comparison_enabled:
-            if st.button('Show Results', key='show_results_peer'):
+        # Track if "Show PL Results" button is clicked
+        if 'pl_show_results_clicked' not in st.session_state:
+            st.session_state['pl_show_results_clicked'] = False
+
+        # If the button is clicked, update the flag
+        if st.button('Show PL Results', key='pl_show_results'):
+            st.session_state['pl_show_results_clicked'] = True
+
+        # Only process and display results if the button has been clicked
+        if st.session_state['pl_show_results_clicked']:
+            if peer_comparison_enabled:
                 st.subheader("Peer Comparison")
                 # Use the pre-fetched and processed NSE data from session state
                 nse_data = st.session_state['nse_results_quarters']
@@ -1084,15 +1313,19 @@ def profit_loss_page():
                 sonata_data = aggregate_data_single_row_merged(selected_search_terms_quarters, st.session_state['pl_data_frames'], selected_quarters)
 
                 for term, df in formatted_data.items():
-                    #st.subheader(f"Peer Comparison - Quarter-based: {term}")
-                    
+                    # If Basic (₹), skip convert_lakhs_to_crores
+                    if term != 'Basic (₹)':
+                        df = convert_lakhs_to_crores(df)  # Apply the lakhs to crores conversion for all terms except 'Basic (₹)'
+
                     df = df.reset_index()
-                    df = convert_lakhs_to_crores(df)
+
+                    # Filter peer data based on selected companies
+                    df = df[df['Company'].isin(selected_companies)]
 
                     # Combine Sonata data and peers' data, removing duplicates
                     sonata_columns = [col for col in df.columns if col in sonata_data[term].columns and col != 'Company']
                     peer_columns = [col for col in df.columns if col not in sonata_data[term].columns and col != 'Company']
-                    
+
                     unique_columns = ['Company'] + sonata_columns + peer_columns
 
                     if term in sonata_data:
@@ -1104,32 +1337,47 @@ def profit_loss_page():
                     st.session_state['df_combined'][term] = df_combined
 
                     # Display the combined DataFrame
-                    #st.dataframe(df_combined)
-                    
+                    st.dataframe(df_combined)
+
                     # Collect the DataFrame in the dictionary
                     term_data_dict[term] = df_combined
 
-                    # Forecast and plot if peer comparison is enabled
-                    #st.subheader(f"Forecast for {term}")
+                    # Plot the data
                     cols = st.columns(1)
                     forecast_and_plot(df_combined, term, df_combined.columns[1:], cols[0], add_legend=False, chart_type='line')
-                    st.markdown("**Note:** Data indicating zero may imply that the data is not present or not extracted due to improper headings.")
 
-        else:
-            if st.button('Show Results', key='show_results_no_peer'):
-                results_quarters = aggregate_data_single_row_merged(selected_search_terms_quarters, st.session_state['pl_data_frames'], selected_quarters)
-                
+            else:
+                results_quarters = aggregate_data_single_row_merged(
+                    selected_search_terms_quarters, 
+                    st.session_state['pl_data_frames'], 
+                    selected_quarters
+                )
+
                 st.session_state['pl_results_quarters'] = results_quarters
                 st.session_state['sorted_pl_quarters'] = selected_quarters
 
                 # Display the results without peer comparison
-                display_consolidated_pl_results_quarters(st.session_state['pl_results_quarters'], st.session_state['sorted_pl_quarters'], chart_type='area')
-                
+                display_consolidated_pl_results_quarters(
+                    st.session_state['pl_results_quarters'], 
+                    st.session_state['sorted_pl_quarters'], 
+                    chart_type='area'
+                )
+
                 # Collect the DataFrame in the dictionary for non-peer comparison
                 for term, df in st.session_state['pl_results_quarters'].items():
                     term_data_dict[term] = df
 
+        # Show download button only if peer comparison is enabled and PowerPoint is generated
+        if peer_comparison_enabled and term_data_dict:
+            ppt_io = generate_ppt(term_data_dict, "P&L Presentation")
+            st.download_button(
+                label="Download P&L PowerPoint",
+                data=ppt_io,
+                file_name="profit_loss_visualization.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            )
 
+        
 
 # Function to fetch and store NSE data upfront
 def fetch_and_store_nse_data():
@@ -1185,7 +1433,7 @@ def display_consolidated_pl_results_quarters(results, quarters, chart_type):
     for term in terms:
         #st.subheader(f"Results for {term}")
         df = results[term].reindex(columns=['Company'] + valid_quarters)
-        #st.dataframe(df)
+        st.dataframe(df)
 
         # Plotting
         if not df.empty:
@@ -1196,37 +1444,48 @@ def display_consolidated_pl_results_quarters(results, quarters, chart_type):
 def kpi_page():
     kpi_data_dict = {}  # Dictionary to hold data for each KPI
 
-    st.subheader("Key Performance Indicators (KPIs)")
+    #st.subheader("Key Performance Indicators (KPIs)")
 
-    peer_comparison_enabled = st.checkbox("Peer Comparison")
-    #include_forecast_kpi = st.checkbox("Include Forecast", key='include_forecast_KPI')
+    # Track peer comparison state in session state
+    if 'peer_comparison_enabled' not in st.session_state:
+        st.session_state['peer_comparison_enabled'] = False
 
-    # Show KPI Results Button
-    if st.button('Show KPI Results'):
+    peer_comparison_enabled = st.checkbox("Peer Comparison", value=st.session_state['peer_comparison_enabled'])
+    st.session_state['peer_comparison_enabled'] = peer_comparison_enabled
+
+    # Track if "Show KPI Results" button is clicked
+    if 'kpi_show_results_clicked' not in st.session_state:
+        st.session_state['kpi_show_results_clicked'] = False
+
+    # If the button is clicked, update the flag
+    if st.button('Show KPI Results', key='kpi_show_results'):
+        st.session_state['kpi_show_results_clicked'] = True
+
+    # Only process and display results if the button has been clicked or results already exist
+    if st.session_state['kpi_show_results_clicked']:
         # Process Balance Sheet KPIs
         if 'merged_df1' in st.session_state:
             merged_df1 = st.session_state['merged_df1']
-            
+
             # List of required terms for Balance Sheet
             terms_bs = [
                 'Total assets', 
                 'Total Equity', 
                 'Total non-current liabilities', 
                 'Total current liabilities'
-                #'Cash and cash equivalents'
             ]
-            
+
             kpis_bs = {
                 'Net Worth': pd.DataFrame(),
                 'Net Assets': pd.DataFrame()
             }
-            
+
             # Check if required data is available for Balance Sheet
             for term in terms_bs:
                 if term not in merged_df1:
                     st.warning(f"Data for {term} not found in the combined data.")
                     return
-            
+
             # Extract required data from Balance Sheet
             total_assets = merged_df1['Total assets']
             total_equity = merged_df1['Total Equity']
@@ -1266,11 +1525,11 @@ def kpi_page():
                 st.subheader(f"KPI (Balance Sheet): {kpi_name}")
                 kpi_df = pd.DataFrame(kpi_df).T  # Transpose to get financial years as columns
                 kpi_df.columns = total_assets.columns[1:]  # Set financial year names as columns
-                
+
                 kpi_df.insert(0, 'Company', companies if peer_comparison_enabled else ['sonata-software'])
 
                 kpi_df = kpi_df.reset_index(drop=True)
-                #st.dataframe(kpi_df)
+                st.dataframe(kpi_df)
 
                 # Collect the DataFrame in the dictionary
                 kpi_data_dict[kpi_name] = kpi_df
@@ -1286,7 +1545,7 @@ def kpi_page():
         # Process Profit & Loss KPIs
         if 'df_combined' in st.session_state:
             df_combined = st.session_state['df_combined']
-            
+
             # List of required terms for Profit & Loss
             terms_pl = [
                 'Revenue from operations', 
@@ -1297,7 +1556,7 @@ def kpi_page():
                 'Profit for the year',
                 'Net tax expense'
             ]
-            
+
             kpis_pl = {
                 'Net Sales': pd.DataFrame(),
                 'EBITDA': pd.DataFrame(),
@@ -1307,13 +1566,13 @@ def kpi_page():
                 'Net Profit Margin %': pd.DataFrame(),
                 'EBIT': pd.DataFrame()
             }
-            
+
             # Check if required data is available for Profit & Loss
             for term in terms_pl:
                 if term not in df_combined:
                     st.warning(f"Data for {term} not found in the combined data.")
                     return
-            
+
             # Extract required data from Profit & Loss
             revenue = df_combined['Revenue from operations']
             finance_costs = df_combined['Finance costs']
@@ -1371,7 +1630,7 @@ def kpi_page():
                 st.subheader(f"KPI (Profit & Loss): {kpi_name}")
                 kpi_df = pd.DataFrame(kpi_df).T  # Transpose to get quarters as columns
                 kpi_df.columns = revenue.columns[1:]  # Set quarter names as columns
-                
+
                 # Insert the Company column correctly based on the number of rows in kpi_df
                 kpi_df.insert(0, 'Company', companies if peer_comparison_enabled else ['sonata-software'])
 
@@ -1379,7 +1638,7 @@ def kpi_page():
                 kpi_df = kpi_df.reset_index(drop=True)
 
                 # Display DataFrame
-                #st.dataframe(kpi_df)
+                st.dataframe(kpi_df)
 
                 # Collect the DataFrame in the dictionary
                 kpi_data_dict[kpi_name] = kpi_df
@@ -1392,7 +1651,18 @@ def kpi_page():
         else:
             st.warning("Profit & Loss data not found. Please process the files in the Profit and Loss section.")
 
-    
+        # PowerPoint Download for KPIs - ONLY if Peer Comparison is Enabled
+        if peer_comparison_enabled and kpi_data_dict:
+            ppt_io = generate_ppt(kpi_data_dict, "KPI Presentation")
+            st.download_button(
+                label="Download KPI PowerPoint",
+                data=ppt_io,
+                file_name="kpi_visualization.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            )
+
+
+
 
 # Load the selected page
 if page == "Balance Sheet":
