@@ -17,7 +17,7 @@ from pptx.enum.text import PP_ALIGN
 import matplotlib.pyplot as plt
 from collections.abc import Sequence
 import time
-from requests.exceptions import ChunkedEncodingError
+from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
 
 
 # Set page configuration
@@ -214,57 +214,77 @@ def download_files(company_symbol, max_retries=3, retry_delay=5):
         "X-Requested-With": "XMLHttpRequest",
         "Connection": "keep-alive"
     }
- 
+
     session = requests.Session()
     session.headers.update(headers)
- 
+
     init_url = f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}"
     session.get(init_url)
- 
+
     response = session.get(url)
- 
+
     if response.status_code == 200:
         data = response.json()
         if data:
             company_name_key = 'companyName' if 'companyName' in data[0] else 'company_name'
             company_name = data[0][company_name_key].replace(" ", "_")
             os.makedirs(company_name, exist_ok=True)
- 
+
             file_names = [item['fileName'].split("/")[-1] for item in data[:4]]
             df_files = pd.DataFrame(file_names, columns=['FileName'])
             df_files['Exists'] = df_files['FileName'].apply(lambda x: os.path.isfile(os.path.join(company_name, x)))
- 
+
             files_to_download = df_files[df_files['Exists'] == False]['FileName'].tolist()
- 
+
             with st.spinner("Downloading files..."):
                 for file_name in files_to_download:
                     file_url = next(item['fileName'] for item in data if item['fileName'].endswith(file_name))
                     file_extension = file_name.split('.')[-1].lower()
- 
+
                     retries = 0
                     while retries < max_retries:
                         try:
                             file_response = session.get(file_url, stream=True)
                             if file_response.status_code == 200:
+                                file_size = int(file_response.headers.get('Content-Length', 0))
+                                downloaded_size = 0
+
                                 file_path = os.path.join(company_name, file_name)
                                 with open(file_path, 'wb') as file:
-                                    for chunk in file_response.iter_content(1024):
-                                        file.write(chunk)
+                                    for chunk in file_response.iter_content(1024 * 1024):  # 1MB chunks
+                                        if chunk:
+                                            file.write(chunk)
+                                            downloaded_size += len(chunk)
+
+                                # Check if the entire file has been downloaded
+                                if downloaded_size < file_size:
+                                    raise ChunkedEncodingError("Incomplete file download")
+
                                 break  # If the download is successful, break the retry loop
                             else:
                                 retries += 1
-                                time.sleep(retry_delay)  # Wait before retrying
-                        except ChunkedEncodingError:
+                                st.warning(f"Error {file_response.status_code}. Retrying {retries}/{max_retries}...")
+                                time.sleep(retry_delay)
+                        except (ChunkedEncodingError, ConnectionError, Timeout) as e:
                             retries += 1
-                            st.warning(f"ChunkedEncodingError occurred. Retrying {retries}/{max_retries}...")
+                            st.warning(f"Error {e}. Retrying {retries}/{max_retries}...")
                             time.sleep(retry_delay)
- 
+
                     if retries == max_retries:
                         st.error(f"Failed to download {file_name} after {max_retries} attempts.")
                         return None, []
- 
+
+                    # **Check if the file is a ZIP file before trying to open it**
+                    if file_extension == 'zip':
+                        try:
+                            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                                zip_ref.extractall(company_name)  # Extract ZIP contents
+                        except zipfile.BadZipFile:
+                            st.error(f"{file_name} is not a valid ZIP file or is corrupted.")
+                            continue
+
             return company_name, df_files['FileName'].tolist()
- 
+
     return None, []
 # Function to load and process the data from the Excel file
 def load_and_process_data(excel_file_path):
