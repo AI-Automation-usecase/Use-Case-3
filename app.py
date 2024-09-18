@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 from io import BytesIO
 from xlsxwriter import Workbook
 from pptx import Presentation
-from pptx.util import Inches, Pt  
+from pptx.util import Inches, Pt  # Make sure Pt is imported
 from pptx.enum.text import PP_ALIGN
 import matplotlib.pyplot as plt
 from collections.abc import Sequence
@@ -20,8 +20,6 @@ import time
 from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import logging
-
 
 
 # Set page configuration
@@ -136,63 +134,6 @@ def download_files_once(company_symbol):
         return company_name, all_files
 
 
-def download_files(company_symbol):
-    url = f"https://www.nseindia.com/api/corp-info?symbol={company_symbol}&corpType=annualreport&market=cm"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}",
-        "X-Requested-With": "XMLHttpRequest",
-        "Connection": "keep-alive"
-    }
- 
-    # Setting up session with retries and backoff
-    session = requests.Session()
-    retry = Retry(connect=5, backoff_factor=0.5, status_forcelist=[502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.headers.update(headers)
- 
-    init_url = f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}"
-    session.get(init_url, timeout=10)
- 
-    response = session.get(url, timeout=10)
- 
-    if response.status_code == 200:
-        data = response.json()
-        if data:
-            company_name_key = 'companyName' if 'companyName' in data[0] else 'company_name'
-            company_name = data[0][company_name_key].replace(" ", "_")
-            os.makedirs(company_name, exist_ok=True)
- 
-            file_names = [item['fileName'].split("/")[-1] for item in data[:4]]
-            df_files = pd.DataFrame(file_names, columns=['FileName'])
-            df_files['Exists'] = df_files['FileName'].apply(lambda x: os.path.isfile(os.path.join(company_name, x)))
- 
-            files_to_download = df_files[df_files['Exists'] == False]['FileName'].tolist()
- 
-            with st.spinner("Downloading files..."):
-                for file_name in files_to_download:
-                    file_url = next(item['fileName'] for item in data if item['fileName'].endswith(file_name))
-                    file_extension = file_name.split('.')[-1].lower()
- 
-                    if file_extension in ['zip', 'pdf']:
-                        try:
-                            with session.get(file_url, stream=True, timeout=30) as file_response:
-                                file_response.raise_for_status()
-                                file_path = os.path.join(company_name, file_name)
-                                with open(file_path, 'wb') as file:
-                                    for chunk in file_response.iter_content(chunk_size=8192):
-                                        if chunk:  # Filter out keep-alive chunks
-                                            file.write(chunk)
-                        except requests.exceptions.RequestException as e:
-                            st.error(f"Error downloading {file_name}: {str(e)}")
- 
-            return company_name, df_files['FileName'].tolist()
- 
-    return None, []
-
-
 def extract_data_from_pdf_bs(pdf_file, heading_map, conversion_factor, pdf_filename):
     doc = fitz.open(stream=pdf_file, filetype="pdf")
     data = []
@@ -265,7 +206,61 @@ def extract_date_columns(text):
                 continue
     return date_list
 
-
+def download_files(company_symbol):
+    url = f"https://www.nseindia.com/api/corp-info?symbol={company_symbol}&corpType=annualreport&market=cm"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}",
+        "X-Requested-With": "XMLHttpRequest",
+        "Connection": "keep-alive"
+    }
+ 
+    # Setting up session with retries and backoff
+    session = requests.Session()
+    retry = Retry(connect=5, backoff_factor=0.5, status_forcelist=[502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.headers.update(headers)
+ 
+    init_url = f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}"
+    session.get(init_url, timeout=10)
+ 
+    response = session.get(url, timeout=10)
+ 
+    if response.status_code == 200:
+        data = response.json()
+        if data:
+            company_name_key = 'companyName' if 'companyName' in data[0] else 'company_name'
+            company_name = data[0][company_name_key].replace(" ", "_")
+            os.makedirs(company_name, exist_ok=True)
+ 
+            file_names = [item['fileName'].split("/")[-1] for item in data[:4]]
+            df_files = pd.DataFrame(file_names, columns=['FileName'])
+            df_files['Exists'] = df_files['FileName'].apply(lambda x: os.path.isfile(os.path.join(company_name, x)))
+ 
+            files_to_download = df_files[df_files['Exists'] == False]['FileName'].tolist()
+ 
+            with st.spinner("Downloading files..."):
+                for file_name in files_to_download:
+                    file_url = next(item['fileName'] for item in data if item['fileName'].endswith(file_name))
+                    file_extension = file_name.split('.')[-1].lower()
+ 
+                    if file_extension in ['zip', 'pdf']:
+                        try:
+                            with session.get(file_url, stream=True, timeout=30) as file_response:
+                                file_response.raise_for_status()
+                                file_path = os.path.join(company_name, file_name)
+                                with open(file_path, 'wb') as file:
+                                    for chunk in file_response.iter_content(chunk_size=8192):
+                                        if chunk:  # Filter out keep-alive chunks
+                                            file.write(chunk)
+                        except requests.exceptions.RequestException as e:
+                            st.error(f"Error downloading {file_name}: {str(e)}")
+ 
+            return company_name, df_files['FileName'].tolist()
+ 
+    return None, []
 # Function to load and process the data from the Excel file
 def load_and_process_data(excel_file_path):
     excel_data = pd.ExcelFile(excel_file_path)
@@ -387,6 +382,8 @@ def convert_lakhs_to_crores_value(value):
 def convert_lakhs_to_crores(df):
     return df.applymap(convert_lakhs_to_crores_value)
 
+def replace_missing_values(df):
+    return df.replace({None: 0, 'None': 0, np.nan: 0})
 
 # Function to read the file and extract the required sheet
 def read_file(file, sheet_name):
@@ -602,13 +599,14 @@ def aggregate_data_single_row_merged(search_terms, data_frames_info, selected_fy
     return aggregate_results
 
 
+# Ensure you only download and process files once
 def initialize_download_and_process():
     # Path for the output Excel file
     output_excel_file_path = "peers_data_bs_demo.xlsx"
- 
+
     # Check if the data has already been processed
     if 'processed_data' not in st.session_state or 'fy_columns' not in st.session_state:
-        with st.spinner("processing files..."):
+        with st.spinner("Downloading and processing files..."):
             # Define the companies and their respective units
             companies = {
                 "TCS": "crores",
@@ -620,24 +618,24 @@ def initialize_download_and_process():
                 "HCLTECH": "crores",
                 "COFORGE": "million"
             }
- 
+
             # Define conversion factors for different units
             conversion_factors = {
                 "crores": 1,          # Already in crores
                 "million": 0.1        # Convert from million to crores
             }
- 
+
             # Create an Excel writer to save processed data
             with pd.ExcelWriter(output_excel_file_path, engine='xlsxwriter') as writer:
                 for company, unit in companies.items():
                     conversion_factor = conversion_factors[unit]
                     company_name, all_files = download_files_once(company)
- 
+
                     if company_name:
                         # Debug output for the number of files and their names
                         #st.write(f"Debug: {len(all_files)} files to be processed for company: {company}")
                         #st.write(f"Debug: Files for company {company}: {all_files}")
- 
+
                         # Map of required headings to their possible variations
                         heading_map = {
                             "Total non-current assets": ["Total non-current assets", "Total Non-current assets", "Total Non-Current Assets","Total non-current assets","Total non-current assets","Total Non-current assets"],
@@ -647,34 +645,30 @@ def initialize_download_and_process():
                             "Total non-current liabilities": ["Total non-current liabilities", "Total non- current liabilities", "Total Non-Current Liabilities","Total non-current liabilities","Total non-current liabilities", "Total non- current liabilities"],
                             "Total current liabilities": ["Total current liabilities", "Total Current Liabilities","Total current liabilities","Total current liabilities"],
                             "Total equity and liabilities": ["Total equity and liabilities", "Total Equity and Liabilities", "TOTAL EQUITY AND LIABILITIES","TOTAL EQUITY AND LIABILITIES","Total equity and liabilities"]
-                               
+                                
                         }  
- 
+
                         # Initialize the final DataFrame with the required headings
                         final_data = pd.DataFrame(columns=["Heading"] + list(heading_map.keys()))
                         final_data["Heading"] = list(heading_map.keys())
- 
+
                         processed_files = set()
                         date_columns_set = set()
- 
+
                         for file_name in all_files:
                             file_path = os.path.join(company_name, file_name)
- 
-                            # Check if the file is a ZIP file before opening it
+
                             if file_name.endswith(".zip"):
-                                try:
-                                    # Handle ZIP file
-                                    with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                                        pdf_file_names = [file for file in zip_ref.namelist() if file.endswith('.pdf')]
-                                        for pdf_file_name in pdf_file_names:
-                                            if pdf_file_name not in processed_files:
-                                                with zip_ref.open(pdf_file_name) as pdf_file:
-                                                    extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, pdf_file_name)
-                                                    if extracted_data and extracted_date_columns:
-                                                        process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
-                                                        processed_files.add(pdf_file_name)
-                                except zipfile.BadZipFile:
-                                    st.error(f"Error: {file_name} is not a valid zip file.")
+                                # Handle ZIP file
+                                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                                    pdf_file_names = [file for file in zip_ref.namelist() if file.endswith('.pdf')]
+                                    for pdf_file_name in pdf_file_names:
+                                        if pdf_file_name not in processed_files:
+                                            with zip_ref.open(pdf_file_name) as pdf_file:
+                                                extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, pdf_file_name)
+                                                if extracted_data and extracted_date_columns:
+                                                    process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
+                                                    processed_files.add(pdf_file_name)
                             elif file_name.endswith(".pdf"):
                                 # Handle PDF file
                                 if file_name not in processed_files:
@@ -684,27 +678,30 @@ def initialize_download_and_process():
                                         if extracted_data and extracted_date_columns:
                                             process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
                                             processed_files.add(file_name)
- 
+                                        else:
+                                            st.write(f"Debug: No data extracted from file: {file_name}")
+
                         # Remove the initialized columns used for structure
                         final_data = final_data.drop(columns=list(heading_map.keys()), axis=1, errors='ignore')
- 
+
                         # Sort the columns based on the year extracted from the column names
                         columns_sorted = ["Heading"] + sorted(list(date_columns_set), key=extract_year)
                         final_data = final_data[columns_sorted]
- 
+
                         # Add a new row at the top for financial year values
                         financial_year_row = ["Financial Year"] + [calculate_financial_year(col) for col in columns_sorted[1:]]
                         final_data.loc[-1] = financial_year_row  # Add the row at the start
                         final_data.index = final_data.index + 1  # Shift index by 1
                         final_data = final_data.sort_index()  # Sort the index
- 
+
                         # Write the DataFrame to an Excel sheet
                         final_data.to_excel(writer, sheet_name=company, index=False, header=False)
- 
+
             # Load the processed Excel file into session state
             processed_data, fy_columns = load_and_process_data(output_excel_file_path)
             st.session_state['processed_data'] = processed_data
             st.session_state['fy_columns'] = fy_columns
+
 # Ensure the initialization is done only once
 initialize_download_and_process()
 
@@ -1020,7 +1017,7 @@ def balance_sheet_page():
                     # Plot the merged data
                     cols = st.columns(1)
                     forecast_and_plot(merged_df1, term, merged_df1.columns[1:], cols[0], add_legend=False, chart_type='line')
-                    st.markdown("**Note:**Data showing None may indicate it's missing or not extracted due to incorrect headings")
+                    st.markdown("**Note:** Data showing None may indicate it's missing or not extracted due to incorrect headings")
 
             else:
                 display_consolidated_balance_results(st.session_state['balance_results'], st.session_state['sorted_balance_fys'], chart_type='area')
@@ -1317,7 +1314,7 @@ def profit_loss_page():
         # Only process and display results if the button has been clicked
         if st.session_state['pl_show_results_clicked']:
             if peer_comparison_enabled:
-                #st.subheader("Peer Comparison")
+                st.subheader("Peer Comparison")
                 # Use the pre-fetched and processed NSE data from session state
                 nse_data = st.session_state['nse_results_quarters']
 
