@@ -20,6 +20,10 @@ import time
 from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import logging  # Add logging for errors
+ 
+# Set up logging to log errors in the app
+logging.basicConfig(level=logging.ERROR)
 
 
 # Set page configuration
@@ -599,14 +603,175 @@ def aggregate_data_single_row_merged(search_terms, data_frames_info, selected_fy
     return aggregate_results
 
 
-# Ensure you only download and process files once
+import logging  # Add logging for errors
+ 
+# Set up logging to log errors in the app
+
+logging.basicConfig(level=logging.ERROR)
+ 
+def initialize_download_and_process():
+
+    # Path for the output Excel file
+
+    output_excel_file_path = "peers_data_bs_demo.xlsx"
+ 
+    # Check if the data has already been processed
+
+    if 'processed_data' not in st.session_state or 'fy_columns' not in st.session_state:
+
+        with st.spinner(" processing files..."):
+
+            # Define the companies and their respective units
+
+            companies = {
+
+                "TCS": "crores",
+
+                "WIPRO": "million",
+
+                "MPHASIS": "million",
+
+                "INFY": "crores",
+
+                "LTIM": "million",
+
+                "ZENSARTECH": "million",
+
+                "HCLTECH": "crores",
+
+                "COFORGE": "million"
+
+            }
+ 
+            # Define conversion factors for different units
+
+            conversion_factors = {
+
+                "crores": 1,          # Already in crores
+
+                "million": 0.1        # Convert from million to crores
+
+            }
+ 
+            # Create an Excel writer to save processed data
+
+            with pd.ExcelWriter(output_excel_file_path, engine='xlsxwriter') as writer:
+
+                for company, unit in companies.items():
+
+                    conversion_factor = conversion_factors[unit]
+
+                    company_name, all_files = download_files_once(company)
+ 
+                    if company_name:
+
+                        # Initialize the final DataFrame with the required headings
+
+                        final_data = pd.DataFrame(columns=["Heading"] + list(heading_map.keys()))
+
+                        final_data["Heading"] = list(heading_map.keys())
+ 
+                        processed_files = set()
+
+                        date_columns_set = set()
+ 
+                        for file_name in all_files:
+
+                            file_path = os.path.join(company_name, file_name)
+ 
+                            try:
+
+                                if file_name.endswith(".zip"):
+
+                                    # Handle ZIP file
+
+                                    with zipfile.ZipFile(file_path, 'r') as zip_ref:
+
+                                        pdf_file_names = [file for file in zip_ref.namelist() if file.endswith('.pdf')]
+
+                                        for pdf_file_name in pdf_file_names:
+
+                                            if pdf_file_name not in processed_files:
+
+                                                with zip_ref.open(pdf_file_name) as pdf_file:
+
+                                                    extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, pdf_file_name)
+
+                                                    if extracted_data and extracted_date_columns:
+
+                                                        process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
+
+                                                        processed_files.add(pdf_file_name)
+
+                                elif file_name.endswith(".pdf"):
+
+                                    # Handle PDF file
+
+                                    if file_name not in processed_files:
+
+                                        with open(file_path, 'rb') as pdf_file:
+
+                                            extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, file_name)
+
+                                            if extracted_data and extracted_date_columns:
+
+                                                process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
+
+                                                processed_files.add(file_name)
+
+                            except zipfile.BadZipFile:
+
+                                logging.error(f"Error: {file_name} is not a valid ZIP file.")
+
+                            except Exception as e:
+
+                                logging.error(f"Error processing {file_name}: {str(e)}")
+ 
+                        # Remove the initialized columns used for structure
+
+                        final_data = final_data.drop(columns=list(heading_map.keys()), axis=1, errors='ignore')
+ 
+                        # Sort the columns based on the year extracted from the column names
+
+                        columns_sorted = ["Heading"] + sorted(list(date_columns_set), key=extract_year)
+
+                        final_data = final_data[columns_sorted]
+ 
+                        # Add a new row at the top for financial year values
+
+                        financial_year_row = ["Financial Year"] + [calculate_financial_year(col) for col in columns_sorted[1:]]
+
+                        final_data.loc[-1] = financial_year_row  # Add the row at the start
+
+                        final_data.index = final_data.index + 1  # Shift index by 1
+
+                        final_data = final_data.sort_index()  # Sort the index
+ 
+                        # Write the DataFrame to an Excel sheet
+
+                        final_data.to_excel(writer, sheet_name=company, index=False, header=False)
+ 
+            # Load the processed Excel file into session state
+
+            processed_data, fy_columns = load_and_process_data(output_excel_file_path)
+
+            st.session_state['processed_data'] = processed_data
+
+            st.session_state['fy_columns'] = fy_columns
+
+ 
+import logging  # Add logging for errors
+ 
+# Set up logging to log errors in the app
+logging.basicConfig(level=logging.ERROR)
+ 
 def initialize_download_and_process():
     # Path for the output Excel file
     output_excel_file_path = "peers_data_bs_demo.xlsx"
-
+ 
     # Check if the data has already been processed
     if 'processed_data' not in st.session_state or 'fy_columns' not in st.session_state:
-        with st.spinner("Downloading and processing files..."):
+        with st.spinner("processing files..."):
             # Define the companies and their respective units
             companies = {
                 "TCS": "crores",
@@ -618,24 +783,20 @@ def initialize_download_and_process():
                 "HCLTECH": "crores",
                 "COFORGE": "million"
             }
-
+ 
             # Define conversion factors for different units
             conversion_factors = {
                 "crores": 1,          # Already in crores
                 "million": 0.1        # Convert from million to crores
             }
-
+ 
             # Create an Excel writer to save processed data
             with pd.ExcelWriter(output_excel_file_path, engine='xlsxwriter') as writer:
                 for company, unit in companies.items():
                     conversion_factor = conversion_factors[unit]
                     company_name, all_files = download_files_once(company)
-
+ 
                     if company_name:
-                        # Debug output for the number of files and their names
-                        #st.write(f"Debug: {len(all_files)} files to be processed for company: {company}")
-                        #st.write(f"Debug: Files for company {company}: {all_files}")
-
                         # Map of required headings to their possible variations
                         heading_map = {
                             "Total non-current assets": ["Total non-current assets", "Total Non-current assets", "Total Non-Current Assets","Total non-current assets","Total non-current assets","Total Non-current assets"],
@@ -645,63 +806,65 @@ def initialize_download_and_process():
                             "Total non-current liabilities": ["Total non-current liabilities", "Total non- current liabilities", "Total Non-Current Liabilities","Total non-current liabilities","Total non-current liabilities", "Total non- current liabilities"],
                             "Total current liabilities": ["Total current liabilities", "Total Current Liabilities","Total current liabilities","Total current liabilities"],
                             "Total equity and liabilities": ["Total equity and liabilities", "Total Equity and Liabilities", "TOTAL EQUITY AND LIABILITIES","TOTAL EQUITY AND LIABILITIES","Total equity and liabilities"]
-                                
-                        }  
-
+                               
+                        }
                         # Initialize the final DataFrame with the required headings
                         final_data = pd.DataFrame(columns=["Heading"] + list(heading_map.keys()))
                         final_data["Heading"] = list(heading_map.keys())
-
+ 
                         processed_files = set()
                         date_columns_set = set()
-
+ 
                         for file_name in all_files:
                             file_path = os.path.join(company_name, file_name)
-
-                            if file_name.endswith(".zip"):
-                                # Handle ZIP file
-                                with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                                    pdf_file_names = [file for file in zip_ref.namelist() if file.endswith('.pdf')]
-                                    for pdf_file_name in pdf_file_names:
-                                        if pdf_file_name not in processed_files:
-                                            with zip_ref.open(pdf_file_name) as pdf_file:
-                                                extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, pdf_file_name)
-                                                if extracted_data and extracted_date_columns:
-                                                    process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
-                                                    processed_files.add(pdf_file_name)
-                            elif file_name.endswith(".pdf"):
-                                # Handle PDF file
-                                if file_name not in processed_files:
-                                    #st.write(f"Debug: Attempting to process file: {file_name}")
-                                    with open(file_path, 'rb') as pdf_file:
-                                        extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, file_name)
-                                        if extracted_data and extracted_date_columns:
-                                            process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
-                                            processed_files.add(file_name)
-                                        else:
-                                            st.write(f"Debug: No data extracted from file: {file_name}")
-
+ 
+                            try:
+                                if file_name.endswith(".zip"):
+                                    # Handle ZIP file
+                                    with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                                        pdf_file_names = [file for file in zip_ref.namelist() if file.endswith('.pdf')]
+                                        for pdf_file_name in pdf_file_names:
+                                            if pdf_file_name not in processed_files:
+                                                with zip_ref.open(pdf_file_name) as pdf_file:
+                                                    extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, pdf_file_name)
+                                                    if extracted_data and extracted_date_columns:
+                                                        process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
+                                                        processed_files.add(pdf_file_name)
+                                elif file_name.endswith(".pdf"):
+                                    # Handle PDF file
+                                    if file_name not in processed_files:
+                                        with open(file_path, 'rb') as pdf_file:
+                                            extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, file_name)
+                                            if extracted_data and extracted_date_columns:
+                                                process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
+                                                processed_files.add(file_name)
+                            except zipfile.BadZipFile:
+                                logging.error(f"Error: {file_name} is not a valid ZIP file.")
+                            except Exception as e:
+                                logging.error(f"Error processing {file_name}: {str(e)}")
+ 
                         # Remove the initialized columns used for structure
                         final_data = final_data.drop(columns=list(heading_map.keys()), axis=1, errors='ignore')
-
+ 
                         # Sort the columns based on the year extracted from the column names
                         columns_sorted = ["Heading"] + sorted(list(date_columns_set), key=extract_year)
                         final_data = final_data[columns_sorted]
-
+ 
                         # Add a new row at the top for financial year values
                         financial_year_row = ["Financial Year"] + [calculate_financial_year(col) for col in columns_sorted[1:]]
                         final_data.loc[-1] = financial_year_row  # Add the row at the start
                         final_data.index = final_data.index + 1  # Shift index by 1
                         final_data = final_data.sort_index()  # Sort the index
-
+ 
                         # Write the DataFrame to an Excel sheet
                         final_data.to_excel(writer, sheet_name=company, index=False, header=False)
-
+ 
             # Load the processed Excel file into session state
             processed_data, fy_columns = load_and_process_data(output_excel_file_path)
             st.session_state['processed_data'] = processed_data
             st.session_state['fy_columns'] = fy_columns
-
+ 
+ 
 # Ensure the initialization is done only once
 initialize_download_and_process()
 
