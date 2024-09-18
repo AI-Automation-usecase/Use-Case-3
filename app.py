@@ -661,17 +661,21 @@ def initialize_download_and_process():
                         for file_name in all_files:
                             file_path = os.path.join(company_name, file_name)
 
+                            # Check if the file is a ZIP file before opening it
                             if file_name.endswith(".zip"):
-                                # Handle ZIP file
-                                with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                                    pdf_file_names = [file for file in zip_ref.namelist() if file.endswith('.pdf')]
-                                    for pdf_file_name in pdf_file_names:
-                                        if pdf_file_name not in processed_files:
-                                            with zip_ref.open(pdf_file_name) as pdf_file:
-                                                extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, pdf_file_name)
-                                                if extracted_data and extracted_date_columns:
-                                                    process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
-                                                    processed_files.add(pdf_file_name)
+                                try:
+                                    # Handle ZIP file
+                                    with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                                        pdf_file_names = [file for file in zip_ref.namelist() if file.endswith('.pdf')]
+                                        for pdf_file_name in pdf_file_names:
+                                            if pdf_file_name not in processed_files:
+                                                with zip_ref.open(pdf_file_name) as pdf_file:
+                                                    extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, pdf_file_name)
+                                                    if extracted_data and extracted_date_columns:
+                                                        process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
+                                                        processed_files.add(pdf_file_name)
+                                except zipfile.BadZipFile:
+                                    st.error(f"Error: {file_name} is not a valid zip file.")
                             elif file_name.endswith(".pdf"):
                                 # Handle PDF file
                                 if file_name not in processed_files:
@@ -681,9 +685,6 @@ def initialize_download_and_process():
                                         if extracted_data and extracted_date_columns:
                                             process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
                                             processed_files.add(file_name)
-                                        else:
-                                            #st.write(f"Debug: No data extracted from file: {file_name}")
-                                            logging.info(f"No data extracted from file: {file_name}")
 
                         # Remove the initialized columns used for structure
                         final_data = final_data.drop(columns=list(heading_map.keys()), axis=1, errors='ignore')
