@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 from io import BytesIO
 from xlsxwriter import Workbook
 from pptx import Presentation
-from pptx.util import Inches, Pt  # Make sure Pt is imported
+from pptx.util import Inches, Pt  
 from pptx.enum.text import PP_ALIGN
 import matplotlib.pyplot as plt
 from collections.abc import Sequence
@@ -20,6 +20,8 @@ import time
 from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import logging
+
 
 
 # Set page configuration
@@ -134,6 +136,63 @@ def download_files_once(company_symbol):
         return company_name, all_files
 
 
+def download_files(company_symbol):
+    url = f"https://www.nseindia.com/api/corp-info?symbol={company_symbol}&corpType=annualreport&market=cm"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}",
+        "X-Requested-With": "XMLHttpRequest",
+        "Connection": "keep-alive"
+    }
+ 
+    # Setting up session with retries and backoff
+    session = requests.Session()
+    retry = Retry(connect=5, backoff_factor=0.5, status_forcelist=[502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.headers.update(headers)
+ 
+    init_url = f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}"
+    session.get(init_url, timeout=10)
+ 
+    response = session.get(url, timeout=10)
+ 
+    if response.status_code == 200:
+        data = response.json()
+        if data:
+            company_name_key = 'companyName' if 'companyName' in data[0] else 'company_name'
+            company_name = data[0][company_name_key].replace(" ", "_")
+            os.makedirs(company_name, exist_ok=True)
+ 
+            file_names = [item['fileName'].split("/")[-1] for item in data[:4]]
+            df_files = pd.DataFrame(file_names, columns=['FileName'])
+            df_files['Exists'] = df_files['FileName'].apply(lambda x: os.path.isfile(os.path.join(company_name, x)))
+ 
+            files_to_download = df_files[df_files['Exists'] == False]['FileName'].tolist()
+ 
+            with st.spinner("Downloading files..."):
+                for file_name in files_to_download:
+                    file_url = next(item['fileName'] for item in data if item['fileName'].endswith(file_name))
+                    file_extension = file_name.split('.')[-1].lower()
+ 
+                    if file_extension in ['zip', 'pdf']:
+                        try:
+                            with session.get(file_url, stream=True, timeout=30) as file_response:
+                                file_response.raise_for_status()
+                                file_path = os.path.join(company_name, file_name)
+                                with open(file_path, 'wb') as file:
+                                    for chunk in file_response.iter_content(chunk_size=8192):
+                                        if chunk:  # Filter out keep-alive chunks
+                                            file.write(chunk)
+                        except requests.exceptions.RequestException as e:
+                            st.error(f"Error downloading {file_name}: {str(e)}")
+ 
+            return company_name, df_files['FileName'].tolist()
+ 
+    return None, []
+
+
 def extract_data_from_pdf_bs(pdf_file, heading_map, conversion_factor, pdf_filename):
     doc = fitz.open(stream=pdf_file, filetype="pdf")
     data = []
@@ -206,61 +265,7 @@ def extract_date_columns(text):
                 continue
     return date_list
 
-def download_files(company_symbol):
-    url = f"https://www.nseindia.com/api/corp-info?symbol={company_symbol}&corpType=annualreport&market=cm"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}",
-        "X-Requested-With": "XMLHttpRequest",
-        "Connection": "keep-alive"
-    }
- 
-    # Setting up session with retries and backoff
-    session = requests.Session()
-    retry = Retry(connect=5, backoff_factor=0.5, status_forcelist=[502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.headers.update(headers)
- 
-    init_url = f"https://www.nseindia.com/get-quotes/equity?symbol={company_symbol}"
-    session.get(init_url, timeout=10)
- 
-    response = session.get(url, timeout=10)
- 
-    if response.status_code == 200:
-        data = response.json()
-        if data:
-            company_name_key = 'companyName' if 'companyName' in data[0] else 'company_name'
-            company_name = data[0][company_name_key].replace(" ", "_")
-            os.makedirs(company_name, exist_ok=True)
- 
-            file_names = [item['fileName'].split("/")[-1] for item in data[:4]]
-            df_files = pd.DataFrame(file_names, columns=['FileName'])
-            df_files['Exists'] = df_files['FileName'].apply(lambda x: os.path.isfile(os.path.join(company_name, x)))
- 
-            files_to_download = df_files[df_files['Exists'] == False]['FileName'].tolist()
- 
-            with st.spinner("Downloading files..."):
-                for file_name in files_to_download:
-                    file_url = next(item['fileName'] for item in data if item['fileName'].endswith(file_name))
-                    file_extension = file_name.split('.')[-1].lower()
- 
-                    if file_extension in ['zip', 'pdf']:
-                        try:
-                            with session.get(file_url, stream=True, timeout=30) as file_response:
-                                file_response.raise_for_status()
-                                file_path = os.path.join(company_name, file_name)
-                                with open(file_path, 'wb') as file:
-                                    for chunk in file_response.iter_content(chunk_size=8192):
-                                        if chunk:  # Filter out keep-alive chunks
-                                            file.write(chunk)
-                        except requests.exceptions.RequestException as e:
-                            st.error(f"Error downloading {file_name}: {str(e)}")
- 
-            return company_name, df_files['FileName'].tolist()
- 
-    return None, []
+
 # Function to load and process the data from the Excel file
 def load_and_process_data(excel_file_path):
     excel_data = pd.ExcelFile(excel_file_path)
@@ -382,8 +387,6 @@ def convert_lakhs_to_crores_value(value):
 def convert_lakhs_to_crores(df):
     return df.applymap(convert_lakhs_to_crores_value)
 
-def replace_missing_values(df):
-    return df.replace({None: 0, 'None': 0, np.nan: 0})
 
 # Function to read the file and extract the required sheet
 def read_file(file, sheet_name):
@@ -606,7 +609,7 @@ def initialize_download_and_process():
 
     # Check if the data has already been processed
     if 'processed_data' not in st.session_state or 'fy_columns' not in st.session_state:
-        with st.spinner("Downloading and processing files..."):
+        with st.spinner("processing files..."):
             # Define the companies and their respective units
             companies = {
                 "TCS": "crores",
@@ -679,7 +682,8 @@ def initialize_download_and_process():
                                             process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
                                             processed_files.add(file_name)
                                         else:
-                                            st.write(f"Debug: No data extracted from file: {file_name}")
+                                            #st.write(f"Debug: No data extracted from file: {file_name}")
+                                            logging.info(f"No data extracted from file: {file_name}")
 
                         # Remove the initialized columns used for structure
                         final_data = final_data.drop(columns=list(heading_map.keys()), axis=1, errors='ignore')
@@ -943,7 +947,7 @@ def balance_sheet_page():
 
         # Only show the company selection when peer comparison is enabled
         if peer_comparison_enabled:
-            companies = ['sonata-software', 'TCS', 'INFY', 'HCLTECH', 'LTIM', 'WIPRO', 'COFORGE', 'MPHASIS', 'ZENSARTECH']
+            companies = ['TCS', 'INFY', 'HCLTECH', 'LTIM', 'WIPRO', 'COFORGE', 'MPHASIS', 'ZENSARTECH']
             selected_companies = st.multiselect("Select Companies for Comparison", options=companies, default=companies, key='selected_companies')
 
         # Track if "Show BS Results" button is clicked or if results have already been generated
@@ -1017,7 +1021,7 @@ def balance_sheet_page():
                     # Plot the merged data
                     cols = st.columns(1)
                     forecast_and_plot(merged_df1, term, merged_df1.columns[1:], cols[0], add_legend=False, chart_type='line')
-                    st.markdown("**Note:** Data indicating zero may imply that the data is not present or not extracted due to improper headings.")
+                    st.markdown("**Note:**Data showing None may indicate it's missing or not extracted due to incorrect headings")
 
             else:
                 display_consolidated_balance_results(st.session_state['balance_results'], st.session_state['sorted_balance_fys'], chart_type='area')
@@ -1314,7 +1318,7 @@ def profit_loss_page():
         # Only process and display results if the button has been clicked
         if st.session_state['pl_show_results_clicked']:
             if peer_comparison_enabled:
-                st.subheader("Peer Comparison")
+                #st.subheader("Peer Comparison")
                 # Use the pre-fetched and processed NSE data from session state
                 nse_data = st.session_state['nse_results_quarters']
 
@@ -1357,7 +1361,7 @@ def profit_loss_page():
                     # Plot the data
                     cols = st.columns(1)
                     forecast_and_plot(df_combined, term, df_combined.columns[1:], cols[0], add_legend=False, chart_type='line')
-
+                    st.markdown("**Note:** Data showing None may indicate it's missing or not extracted due to incorrect headings")
             else:
                 results_quarters = aggregate_data_single_row_merged(
                     selected_search_terms_quarters, 
@@ -1550,7 +1554,7 @@ def kpi_page():
                 cols = st.columns(1)
                 chart_type = 'line' if peer_comparison_enabled else 'area'
                 forecast_and_plot(kpi_df, kpi_name, kpi_df.columns[1:], cols[0], chart_type=chart_type)
-                st.markdown("**Note:** Data indicating zero may imply that the data is not present or not extracted due to improper headings.")
+                st.markdown("**Note:** Data showing None may indicate it's missing or not extracted due to incorrect headings")
         else:
             st.warning("Balance Sheet data not found. Please process the files in the Balance Sheet section.")
 
@@ -1659,7 +1663,7 @@ def kpi_page():
                 cols = st.columns(1)
                 chart_type = 'line' if peer_comparison_enabled else 'area'
                 forecast_and_plot(kpi_df, kpi_name, kpi_df.columns[1:], cols[0], chart_type=chart_type)
-                st.markdown("**Note:** Data indicating zero may imply that the data is not present or not extracted due to improper headings.")
+                st.markdown("**Note:** Data showing None may indicate it's missing or not extracted due to incorrect headings")
         else:
             st.warning("Profit & Loss data not found. Please process the files in the Profit and Loss section.")
 
