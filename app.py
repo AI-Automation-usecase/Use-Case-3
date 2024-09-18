@@ -65,8 +65,8 @@ page = st.sidebar.radio("Select Sheets", ["Balance Sheet", "Profit & Loss", "KPI
 if 'uploaded_files' not in st.session_state:
     st.session_state['uploaded_files'] = []
 
-# if 'balance_files_processed' not in st.session_state:
-#     st.session_state['balance_files_processed'] = False
+if 'balance_files_processed' not in st.session_state:
+     st.session_state['balance_files_processed'] = False
 if 'balance_data_frames' not in st.session_state:
     st.session_state['balance_data_frames'] = []
 if 'balance_results' not in st.session_state:
@@ -592,7 +592,7 @@ def aggregate_data_single_row_merged(search_terms, data_frames_info, selected_fy
 def initialize_download_and_process():
     # Path for the output Excel file
     output_excel_file_path = "peers_data_bs_demo.xlsx"
-
+ 
     # Check if the data has already been processed
     if 'processed_data' not in st.session_state or 'fy_columns' not in st.session_state:
         with st.spinner("Downloading and processing files..."):
@@ -607,24 +607,21 @@ def initialize_download_and_process():
                 "HCLTECH": "crores",
                 "COFORGE": "million"
             }
-
+ 
             # Define conversion factors for different units
             conversion_factors = {
                 "crores": 1,          # Already in crores
                 "million": 0.1        # Convert from million to crores
             }
-
+ 
             # Create an Excel writer to save processed data
+            sheet_written = False  # Track if any sheet is written
             with pd.ExcelWriter(output_excel_file_path) as writer:
                 for company, unit in companies.items():
                     conversion_factor = conversion_factors[unit]
                     company_name, all_files = download_files_once(company)
-
+ 
                     if company_name:
-                        # Debug output for the number of files and their names
-                        #st.write(f"Debug: {len(all_files)} files to be processed for company: {company}")
-                        #st.write(f"Debug: Files for company {company}: {all_files}")
-
                         # Map of required headings to their possible variations
                         heading_map = {
                             "Total non-current assets": ["Total non-current assets", "Total Non-current assets", "Total Non-Current Assets","Total non-current assets","Total non-current assets","Total Non-current assets"],
@@ -634,19 +631,19 @@ def initialize_download_and_process():
                             "Total non-current liabilities": ["Total non-current liabilities", "Total non- current liabilities", "Total Non-Current Liabilities","Total non-current liabilities","Total non-current liabilities", "Total non- current liabilities"],
                             "Total current liabilities": ["Total current liabilities", "Total Current Liabilities","Total current liabilities","Total current liabilities"],
                             "Total equity and liabilities": ["Total equity and liabilities", "Total Equity and Liabilities", "TOTAL EQUITY AND LIABILITIES","TOTAL EQUITY AND LIABILITIES","Total equity and liabilities"]
-                                
-                        }  
-
+                               
+                        }
+ 
                         # Initialize the final DataFrame with the required headings
                         final_data = pd.DataFrame(columns=["Heading"] + list(heading_map.keys()))
                         final_data["Heading"] = list(heading_map.keys())
-
+ 
                         processed_files = set()
                         date_columns_set = set()
-
+ 
                         for file_name in all_files:
                             file_path = os.path.join(company_name, file_name)
-
+ 
                             if file_name.endswith(".zip"):
                                 # Handle ZIP file
                                 with zipfile.ZipFile(file_path, 'r') as zip_ref:
@@ -661,39 +658,43 @@ def initialize_download_and_process():
                             elif file_name.endswith(".pdf"):
                                 # Handle PDF file
                                 if file_name not in processed_files:
-                                    #st.write(f"Debug: Attempting to process file: {file_name}")
                                     with open(file_path, 'rb') as pdf_file:
                                         extracted_data, extracted_date_columns = extract_data_from_pdf_bs(pdf_file.read(), heading_map, conversion_factor, file_name)
                                         if extracted_data and extracted_date_columns:
                                             process_extracted_data(final_data, extracted_data, extracted_date_columns, date_columns_set)
                                             processed_files.add(file_name)
-                                        else:
-                                            st.write(f"Debug: No data extracted from file: {file_name}")
-
-                        # Remove the initialized columns used for structure
+ 
+                        # Drop columns that were initialized but not filled with data
                         final_data = final_data.drop(columns=list(heading_map.keys()), axis=1, errors='ignore')
-
+ 
                         # Sort the columns based on the year extracted from the column names
-                        columns_sorted = ["Heading"] + sorted(list(date_columns_set), key=extract_year)
-                        final_data = final_data[columns_sorted]
-
-                        # Add a new row at the top for financial year values
-                        financial_year_row = ["Financial Year"] + [calculate_financial_year(col) for col in columns_sorted[1:]]
-                        final_data.loc[-1] = financial_year_row  # Add the row at the start
-                        final_data.index = final_data.index + 1  # Shift index by 1
-                        final_data = final_data.sort_index()  # Sort the index
-
-                        # Write the DataFrame to an Excel sheet
-                        final_data.to_excel(writer, sheet_name=company, index=False, header=False)
-
-            # Load the processed Excel file into session state
-            processed_data, fy_columns = load_and_process_data(output_excel_file_path)
-            st.session_state['processed_data'] = processed_data
-            st.session_state['fy_columns'] = fy_columns
-
+                        if not final_data.empty:
+                            columns_sorted = ["Heading"] + sorted(list(date_columns_set), key=extract_year)
+                            final_data = final_data[columns_sorted]
+ 
+                            # Add a new row at the top for financial year values
+                            financial_year_row = ["Financial Year"] + [calculate_financial_year(col) for col in columns_sorted[1:]]
+                            final_data.loc[-1] = financial_year_row  # Add the row at the start
+                            final_data.index = final_data.index + 1  # Shift index by 1
+                            final_data = final_data.sort_index()  # Sort the index
+ 
+                            # Write the DataFrame to an Excel sheet if not empty
+                            if not final_data.empty:
+                                final_data.to_excel(writer, sheet_name=company, index=False, header=False)
+                                sheet_written = True  # Mark that a sheet has been written
+ 
+            # Handle the case where no sheets were written
+            if not sheet_written:
+                st.error("No data was processed or extracted. Please check the input files.")
+ 
+            # Load the processed Excel file into session state only if sheets were written
+            if sheet_written:
+                processed_data, fy_columns = load_and_process_data(output_excel_file_path)
+                st.session_state['processed_data'] = processed_data
+                st.session_state['fy_columns'] = fy_columns
+ 
 # Ensure the initialization is done only once
 initialize_download_and_process()
-
 
 # Function for Balance Sheet Page
 def filter_none_rows(df):
